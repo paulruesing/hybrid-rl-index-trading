@@ -11,9 +11,9 @@ dependencies:
   - pip
   - pytorch
   - torchvision
+  - yfinance=0.2.54
   - pip:
       - notebook
-      - yfinance
       - gym
       - stable-baselines3
       - shimmy
