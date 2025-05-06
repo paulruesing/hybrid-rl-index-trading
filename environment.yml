@@ -11,6 +11,7 @@ dependencies:
   - pip
   - pytorch
   - torchvision
+  - tqdm
   - yfinance=0.2.54
   - pip:
       - notebook
@@ -18,3 +19,4 @@ dependencies:
       - stable-baselines3
       - shimmy
       - rich
+      - alpha_vantage
