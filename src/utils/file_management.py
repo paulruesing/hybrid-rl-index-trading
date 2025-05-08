@@ -18,4 +18,4 @@ def file_title(title: str, dtype_suffix=".svg", short=False):
     if short:
         return datetime.now().strftime('%Y%m%d') + " " + title + dtype_suffix
     else:
-        return datetime.now().strftime('%Y%m%d %H_%M_%S') + " " + title + dtype_suffix
+        return datetime.now().strftime('%Y-%m-%d %H_%M_%S') + " " + title + dtype_suffix
