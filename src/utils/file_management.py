@@ -34,6 +34,9 @@ def most_recent_file(directory: str, suffix_to_consider: str = ".csv", file_titl
                 date = datetime.fromisoformat(din_datestring + ' ' + din_timestring)
                 date_array = np.append(date_array, date)
                 file_array = np.append(file_array, file)
-        return directory / file_array[date_array.argsort()[-1]]
+        try:
+            return directory / file_array[date_array.argsort()[-1]]
+        except IndexError:
+            raise ValueError("Provided directory is empty!")
     else:
         raise NotADirectoryError("Provided path is not a directory (i.e. contains dots)!")
