@@ -462,7 +462,9 @@ class LSTMPredictor:
 
     @predict_before_daily_prediction_hour.setter
     def predict_before_daily_prediction_hour(self, value):
-        self._predict_before_daily_prediction_hour = value; self.prepare_data()
+        self._predict_before_daily_prediction_hour = value
+        # re-prepare data if sampling rate is below 1 hour, because point of prediction changes
+        if self.sampling_rate_minutes < 60: self.prepare_data()
 
     @property
     def rolling_window_size(self):
@@ -827,23 +829,28 @@ class LSTMPredictor:
             # specify prediction start mask:
             target_date_index = self.normalised_price_series[
                                 self.rolling_window_size:-self.forecast_horizon + 1].index  # first and last rows are removed here according to the rolling windows
-            if self.predict_before_daily_prediction_hour:  # predict at last observation before prediction hour
-                prediction_start_mask = (target_date_index.hour == self.daily_prediction_hour - 1) & (
-                        target_date_index.minute >= (
-                            60 - self.sampling_rate_minutes))  # last observation before prediction_hour
+            if self.sampling_rate_minutes > 60:  # if sampling rate larger than 1 hour, no need for minute check:
+                prediction_start_mask = (target_date_index.hour == self.daily_prediction_hour)
                 if self.verbose: print(
-                    f"Target values start at last observation before {self.daily_prediction_hour}:00 daily.\nResulting dataset consists of {len(self._X)} observations.")
-            else:  # predict at first observation in prediction_hour
-                prediction_start_mask = (target_date_index.hour == self.daily_prediction_hour) & (
-                        target_date_index.minute < self._sampling_rate_minutes)  # first observation in prediction_hour
-                if self.verbose: print(
-                    f"Target values start at first observation after {self.daily_prediction_hour}:00 daily.\nResulting dataset consists of {len(self._X)} observations.")
+                    f"Target values start at only observation between {self.daily_prediction_hour}:00 and {self.daily_prediction_hour+1}:00 daily.")
+            else:  # check also for minute of observation:
+                if self.predict_before_daily_prediction_hour:  # predict at last observation before prediction hour
+                    prediction_start_mask = (target_date_index.hour == self.daily_prediction_hour - 1) & (
+                            target_date_index.minute >= (
+                                60 - self.sampling_rate_minutes))  # last observation before prediction_hour
+                    if self.verbose: print(
+                        f"Target values start at last observation before {self.daily_prediction_hour}:00 daily.\nResulting dataset consists of {len(self._X)} observations.")
+                else:  # predict at first observation in prediction_hour
+                    prediction_start_mask = (target_date_index.hour == self.daily_prediction_hour) & (
+                            target_date_index.minute < self._sampling_rate_minutes)  # first observation in prediction_hour
+                    if self.verbose: print(
+                        f"Target values start at first observation after {self.daily_prediction_hour}:00 daily.\nResulting dataset consists of {len(self._X)} observations.")
 
             # select only training values related to target values starting at the specified prediction time:
-            self._X = self._X[prediction_start_mask]
-            self._Y = self._Y[prediction_start_mask]
-            self._X_dates = self._X_dates[prediction_start_mask]
-            self._Y_dates = self._Y_dates[prediction_start_mask]
+            self._X = self.X[prediction_start_mask]
+            self._Y = self.Y[prediction_start_mask]
+            self._X_dates = self.X_dates[prediction_start_mask]
+            self._Y_dates = self.Y_dates[prediction_start_mask]
 
     def split_data(self):
         """ Splits training and target values into training and validation split. """

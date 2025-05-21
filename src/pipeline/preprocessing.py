@@ -207,8 +207,10 @@ def get_data_from_alphavantage(api_key: str,
     return price_frame
 
 
-def time_interpolation_new_sampling_rate(df: Union[pd.DataFrame, pd.Series], interpolation_column: str, datetime_column: str,
+def time_interpolation_new_sampling_rate(df: Union[pd.DataFrame, pd.Series], interpolation_column: str,
+                                         datetime_column: str,
                                          new_sampling_rate: str = '1min',
+                                         custom_start_hour: int = None, custom_start_minute: int = None,
                                          df_lowest_time_unit: Literal['1min', '1sec'] = '1min',
                                          verbose=False,
                                          save_path=None, save_title_identifier: str = None,
@@ -217,6 +219,9 @@ def time_interpolation_new_sampling_rate(df: Union[pd.DataFrame, pd.Series], int
                                          exclude_weekends=True):
     """
     Interpolate samples of a dataframe to fit a new (higher) sampling rate.
+
+    Allows to specify start point of interpolated series besides imported data starting point through
+    custom_start_hour and custom_start_minute.
 
     Respects weekends (if exclude_weekends) and operating hours (if exclude_non_operating_hours, also manually possible with manual_operating_hours e.g. = (9, 18)).
     """
@@ -229,14 +234,16 @@ def time_interpolation_new_sampling_rate(df: Union[pd.DataFrame, pd.Series], int
     df.set_index(datetime_column, inplace=True)
 
     # create optimal datetime index:
-    optimal_date_range = pd.date_range(df.index.min(), df.index.max(),
-                                       freq=new_sampling_rate)
+    date_start = df.index.min()
+    # eventually change starting hour and minute, if such arguments are None, replace yields the unchanged timestamp
+    date_start = date_start.replace(hour=custom_start_hour, minute=custom_start_minute)
+    optimal_date_range = pd.date_range(date_start, df.index.max(), freq=new_sampling_rate)
     if exclude_weekends:  # exclude weekends
         optimal_date_range = optimal_date_range[~optimal_date_range.weekday.isin([5, 6])]
         if verbose:  print("Excluded every entry on Saturday or Sunday.")
     if exclude_non_operating_hours:  # exclude non-operating hours
         operating_hours = (
-        df.index.hour.min(), df.index.hour.max()) if manual_operating_hours is None else manual_operating_hours
+            df.index.hour.min(), df.index.hour.max()) if manual_operating_hours is None else manual_operating_hours
         optimal_date_range = optimal_date_range[
             ~ ((optimal_date_range.hour >= operating_hours[1]) | (optimal_date_range.hour < operating_hours[0]))]
         if verbose: print(f"Excluded every entry before hour {operating_hours[0]} and after hour {operating_hours[1]}.")
