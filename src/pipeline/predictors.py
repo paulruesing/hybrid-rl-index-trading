@@ -970,7 +970,7 @@ class LSTMPredictor:
 
     def plot_prediction_overview(self, data_split: Literal['training', 'validation'] = 'validation',
                                  day_slice: (int, int) = None,
-                                 X_color: str = 'blue', Y_color: str = 'green', pred_color: str = 'red',
+                                 X_color: str = 'blue', Y_color: str = 'red', pred_color: str = 'green',
                                  plot_size: (int, int) = (12, 6),
                                  ) -> None:
         """ Plot prediction overview on training or validation data. """
@@ -1040,7 +1040,7 @@ class LSTMPredictor:
             input_dates = pd.to_datetime(input_dates)
             fig, ax = plt.subplots(figsize=(12, 6))
             ax.plot(input_dates, input_values, color='blue', label='Input Prices')
-            ax.plot(prediction_dates, predictions, color='red', label='Predicted Prices')
+            ax.plot(prediction_dates, predictions, color='green', label='Predicted Prices')
             tendency = 'UP' if (predictions[-1] > input_values[-1]) else 'DOWN'
             print(f'Prices are expected to go {tendency}!')
             # formatting:
