@@ -11,6 +11,33 @@ from alpha_vantage.timeseries import TimeSeries
 
 import src.utils.file_management as filemgmt
 
+
+class Normaliser():
+    def __init__(self):
+        self.mu = None
+        self.sd = None
+
+    def fit_transform(self, x):
+        """ Normalise an array of values. """
+        self.mu = np.mean(x, axis=0)
+        self.sd = np.std(x, axis=0)
+        normalized_x = (x - self.mu) / self.sd
+        return normalized_x
+
+    def transform(self, x):
+        """ Normalise additional data of same sequence as before. """
+        if self.sd is None: raise AttributeError(
+            "Please use fit_transform first so this instance remembers the respective std. and mean values!")
+        normalized_x = (x - self.mu) / self.sd
+        return normalized_x
+
+    def inverse_transform(self, x):
+        """ Reverse-transform an array of normalised values. """
+        if self.sd is None: raise AttributeError(
+            "Please use fit_transform first so this instance remembers the respective std. and mean values!")
+        return (x * self.sd) + self.mu
+
+
 def get_data_from_yahoo(ticker: str = '^GDAXI', duration_days: int = None, sampling_rate_minutes: int = None,
                         sampling_rate_days: int = 1, verbose=True, m_avg_days=[5, 30, 90],
                         price_column='Close', validation_split: float = None,
