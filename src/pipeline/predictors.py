@@ -332,7 +332,6 @@ class LSTMPredictor:
         self._validation_split = validation_split
         self._batch_size = batch_size
 
-        if model_load_file_path is not None: self.load_model_from_pt_file(model_load_file_path)
         self._hidden_lstm_layer_size = hidden_lstm_layer_size
         self._n_lstm_layers = n_lstm_layers
         self._dropout = dropout
@@ -360,6 +359,8 @@ class LSTMPredictor:
         self._dataloader_train = self._dataloader_val = None
 
         self._lstm_model = None
+        if model_load_file_path is not None: self.load_model_from_pt_file(model_load_file_path)
+
         self._device = None
         self._loss_criterion = None
 
@@ -394,7 +395,7 @@ class LSTMPredictor:
         if self.n_train_epochs is not None:
             training_str = f"Training Attributes:\n- final training loss: {self.loss_train}\n- final validation loss: {self.loss_val}\n- final training hit-rate: {self.hit_rate_train}\n- final validation hit-rate: {self.hit_rate_val}"
         else:
-            training_str = "Model wasn't trained yet."
+            training_str = "Model wasn't trained yet (or was imported)."
         return intro_str + data_str + model_str + training_str
 
     # data import parameters:
@@ -665,7 +666,7 @@ class LSTMPredictor:
         # set other properties based on model parameters:
         try:
             a = value.linear_1  # try accessing layer
-            self._use_pre_lstm_fc_layer = True if a is not None else False
+            self._use_pre_lstm_fc_layer = True if (a is not None) else False
         except AttributeError:  # if not found
             self._use_pre_lstm_fc_layer = False
         self._hidden_lstm_layer_size = value.lstm.hidden_size
@@ -787,15 +788,23 @@ class LSTMPredictor:
             self._hit_rate_val = metrics.HitRateMetric()(self.predictions_val, self.Y_val, self.X_val)
         return self._hit_rate_val.item()
 
+    @staticmethod
+    def read_price_csv(csv_path: str, date_column: str = "date", price_column: str = "close") -> pd.DataFrame:
+        """ Read price csv file. Static method to be used also in other classes. """
+        # import csv w correct dtypes:
+        price_file = pd.read_csv(csv_path).dropna(axis=0)
+        try:
+            price_file[date_column] = pd.to_datetime(price_file[date_column])
+        except KeyError:  # if the csv has no name for its index:
+            price_file[date_column] = pd.to_datetime(price_file['Unnamed: 0'])
+        price_file[price_column] = price_file[price_column].astype(float)
+        return price_file.set_index(date_column)[price_column]
+
     def import_data(self):
         """ Import data from LSTMPredictor.price_csv_path file. """
-        price_file = pd.read_csv(self._price_csv_path).dropna(axis=0)
-        try:
-            price_file[self._date_column] = pd.to_datetime(price_file[self._date_column])
-        except KeyError:  # if the csv has no name for its index:
-            price_file[self._date_column] = pd.to_datetime(price_file['Unnamed: 0'])
-        price_file[self._price_column] = price_file[self._price_column].astype(float)
-        self._price_series = price_file.set_index(self._date_column)[self._price_column]
+        self._price_series = self.read_price_csv(csv_path=self._price_csv_path,
+                                                 date_column = self._date_column,
+                                                 price_column = self._price_column)
 
     def prepare_data(self):
         """
@@ -1016,47 +1025,55 @@ class LSTMPredictor:
         ax.legend(handles=legend_elements)
         ax.grid(True)
 
-    def predict(self, input_values: Union[pd.Series, np.array], input_dates: np.array = None,
-                dtype=Literal['pandas', 'numpy']):
+    def predict(self, input_values: Union[pd.Series, np.array],
+                input_dates: np.array = None,
+                dtype=Literal['pandas', 'numpy'],
+                return_tendency: bool = False,):
         """ Predict prices on new values. """
         try:
             input_dates = np.array(input_values.index, dtype=np.datetime64) if input_dates is None else input_dates
+            dates_provided = True
         except AttributeError:
-            raise ValueError(
-                "Either provide input_values pd.Series with DatetimeIndex or input_dates np.array with dates as separate parameter!")
+            dates_provided = False
         input_values = np.array(input_values, dtype=np.float32)
 
         # normalise input:
         normalised_input = np.array(self.normaliser.transform(input_values), dtype=np.float64)
 
         # convert to required shape (batch_size, sequence_length, features)
-        lstm_input_tensor = torch.unsqueeze(torch.Tensor(normalised_input), 0)
-        assert lstm_input_tensor.size()[
-                   1] == self.rolling_window_size, "Prediction input needs to be of shape (n_inputs, rolling_window_size, 1)"
+        lstm_input_tensor = torch.unsqueeze(torch.Tensor(normalised_input), dim=0)
+        lstm_input_tensor = torch.unsqueeze(lstm_input_tensor, dim=2)
+        if lstm_input_tensor.size()[1] != self.rolling_window_size:
+            raise ValueError(f"Input values length needs to match model's rolling window size ({self.rolling_window_size})")
 
         # call model and re-transform input:
         predictions = self.lstm_model(lstm_input_tensor)
         predictions = predictions.cpu().detach().numpy()
         predictions = np.squeeze(self._normaliser.inverse_transform(predictions))
-        prediction_dates = pd.date_range(input_dates.max() + pd.Timedelta(f'{self.sampling_rate_minutes}min'),
-                                         input_dates.max() + self.forecast_horizon * pd.Timedelta(
-                                             f'{self.sampling_rate_minutes}min'),
-                                         freq=f"{self.sampling_rate_minutes}min")
+        if dates_provided:
+            prediction_dates = pd.date_range(input_dates.max() + pd.Timedelta(f'{self.sampling_rate_minutes}min'),
+                                             input_dates.max() + self.forecast_horizon * pd.Timedelta(
+                                                 f'{self.sampling_rate_minutes}min'),
+                                             freq=f"{self.sampling_rate_minutes}min")
+        else:
+            prediction_dates = range(len(input_values), len(input_values) + len(predictions))
+        tendency = 'up' if (predictions[-1] > input_values[-1]) else 'down'
 
         if self.verbose:
-            input_dates = pd.to_datetime(input_dates)
+            if dates_provided: input_dates = pd.to_datetime(input_dates)
             fig, ax = plt.subplots(figsize=(12, 6))
-            ax.plot(input_dates, input_values, color='blue', label='Input Prices')
-            ax.plot(prediction_dates, predictions, color='green', label='Predicted Prices')
-            tendency = 'UP' if (predictions[-1] > input_values[-1]) else 'DOWN'
-            print(f'Prices are expected to go {tendency}!')
+            ax.plot(input_dates if dates_provided else range(len(input_values)), input_values, color='blue', label='Input Prices')
+            ax.plot(prediction_dates,
+                    predictions, color='green', label='Predicted Prices')
+            print(f'Prices are expected to go {tendency.upper()}!')
             # formatting:
-            ax.set_xlabel('Date')
+            ax.set_xlabel('Date' if dates_provided else 'Timestep')
             ax.set_ylabel('Price')
             ax.set_title('Prediction Overview')
             ax.legend()
 
-        if dtype == 'pandas':
-            return pd.Series(index=prediction_dates, data=predictions)
-        else:
-            return predictions, prediction_dates
+        # what to return:
+        if dtype == 'pandas': output = pd.Series(index=prediction_dates, data=predictions)
+        else: output = predictions, prediction_dates
+        if return_tendency: return output + tuple([tendency])
+        else: return output
