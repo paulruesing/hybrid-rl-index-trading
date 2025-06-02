@@ -788,26 +788,17 @@ class LSTMPredictor:
             self._hit_rate_val = metrics.HitRateMetric()(self.predictions_val, self.Y_val, self.X_val)
         return self._hit_rate_val.item()
 
-    @staticmethod
-    def read_price_csv(csv_path: str, date_column: str = "date", price_column: str = "close") -> pd.DataFrame:
-        """ Read price csv file. Static method to be used also in other classes. """
-        # import csv w correct dtypes:
-        price_file = pd.read_csv(csv_path).dropna(axis=0)
-        try:
-            price_file[date_column] = pd.to_datetime(price_file[date_column])
-        except KeyError:  # if the csv has no name for its index:
-            price_file[date_column] = pd.to_datetime(price_file['Unnamed: 0'])
-        price_file[price_column] = price_file[price_column].astype(float)
-        return price_file.set_index(date_column)[price_column]
 
     def import_data(self):
         """ Import data from LSTMPredictor.price_csv_path file. """
-        self._price_series = self.read_price_csv(csv_path=self._price_csv_path,
-                                                 date_column = self._date_column,
-                                                 price_column = self._price_column)
+        self._price_series = preprocessing.read_price_csv(csv_path=self._price_csv_path,
+                                                          date_column=self._date_column,
+                                                          price_column=self._price_column)
 
     def prepare_data(self):
         """
+        Leverages preprocessing.create_rolling_window_view().
+
         Creates a rolling window matrix of training data and target values based on a time-series with datetime index.
         Columns of training data are defined by rolling_window_size, columns of target data by forecast_horizon.
 
@@ -816,68 +807,29 @@ class LSTMPredictor:
         to the targets always starting at the first sample after 3 pm.
         This further requires specifying sampling_rate_minutes to find the first entry in that prediction hour.
         """
-        # sliding window view as matrix: last column are current prices, 1st to (rolling-window-size - 1)th column are retrospective prices:
-        self._X = np.lib.stride_tricks.sliding_window_view(self.normalised_price_series.to_numpy(),
-                                                           window_shape=self._rolling_window_size)[
-                  :-self._forecast_horizon]  # last rows (latest values) are removed (because contained only in target values)
-        self._X_dates = np.lib.stride_tricks.sliding_window_view(self.normalised_price_series.index.to_numpy(),
-                                                                 window_shape=self._rolling_window_size)[
-                        :-self._forecast_horizon]
-
-        # target values are subsequent prices, window size here is referred to as the forecast_horizon:
-        self._Y = np.lib.stride_tricks.sliding_window_view(self.normalised_price_series.to_numpy(),
-                                                           window_shape=self.forecast_horizon)[
-                  self.rolling_window_size:]  # first rows (earliest values) are removed (because contained only in training values)
-        self._Y_dates = np.lib.stride_tricks.sliding_window_view(self.normalised_price_series.index.to_numpy(),
-                                                                 window_shape=self.forecast_horizon)[
-                        self.rolling_window_size:]  # first rows (earliest values) are removed (because contained only in training values)
-        if self.verbose: print(
-            f"Created rolling window view based on rolling_window_size of {self.rolling_window_size} and forecast_horizon of {self.forecast_horizon} with a time unit of {self.sampling_rate_minutes} minutes.")
-
-        if self._daily_prediction_hour is not None:
-            # specify prediction start mask:
-            target_date_index = self.normalised_price_series[
-                                self.rolling_window_size:-self.forecast_horizon + 1].index  # first and last rows are removed here according to the rolling windows
-            if self.sampling_rate_minutes > 60:  # if sampling rate larger than 1 hour, no need for minute check:
-                prediction_start_mask = (target_date_index.hour == self.daily_prediction_hour)
-                if self.verbose: print(
-                    f"Target values start at only observation between {self.daily_prediction_hour}:00 and {self.daily_prediction_hour+1}:00 daily.")
-            else:  # check also for minute of observation:
-                if self.predict_before_daily_prediction_hour:  # predict at last observation before prediction hour
-                    prediction_start_mask = (target_date_index.hour == self.daily_prediction_hour - 1) & (
-                            target_date_index.minute >= (
-                                60 - self.sampling_rate_minutes))  # last observation before prediction_hour
-                    if self.verbose: print(
-                        f"Target values start at last observation before {self.daily_prediction_hour}:00 daily.\nResulting dataset consists of {len(self._X)} observations.")
-                else:  # predict at first observation in prediction_hour
-                    prediction_start_mask = (target_date_index.hour == self.daily_prediction_hour) & (
-                            target_date_index.minute < self._sampling_rate_minutes)  # first observation in prediction_hour
-                    if self.verbose: print(
-                        f"Target values start at first observation after {self.daily_prediction_hour}:00 daily.\nResulting dataset consists of {len(self._X)} observations.")
-
-            # select only training values related to target values starting at the specified prediction time:
-            self._X = self.X[prediction_start_mask]
-            self._Y = self.Y[prediction_start_mask]
-            self._X_dates = self.X_dates[prediction_start_mask]
-            self._Y_dates = self.Y_dates[prediction_start_mask]
+        (self._X, self._Y, self._X_dates, self._Y_dates
+         ) = preprocessing.create_rolling_window_view(input_series=self.normalised_price_series,
+                                                      rolling_window_size=self.rolling_window_size,
+                                                      forecast_horizon=self.forecast_horizon,
+                                                      sampling_rate_minutes=self.sampling_rate_minutes,
+                                                      daily_prediction_hour=self.daily_prediction_hour,
+                                                      predict_before_daily_prediction_hour=self.predict_before_daily_prediction_hour,
+                                                      verbose=self.verbose)
 
     def split_data(self):
-        """ Splits training and target values into training and validation split. """
-        validation_split_index = int(self.X.shape[0] * (1 - self.validation_split))
-        self._X_train = self.X[:validation_split_index]
-        self._X_val = self.X[validation_split_index:]
-        self._Y_train = self.Y[:validation_split_index]
-        self._Y_val = self.Y[validation_split_index:]
-        if self.verbose: print(
-            f"Using last {100 * self.validation_split}% of data for validation. Other data for training.")
-        if self.verbose: print(
-            f"This yields {len(self.X_train)} training and {len(self.X_val)} validation observations.")
+        """
+        Leverages preprocessing.create_train_validation_split.
 
-        # split respective dates:
-        self._X_dates_train = self.X_dates[:validation_split_index]
-        self._X_dates_val = self.X_dates[validation_split_index:]
-        self._Y_dates_train = self.Y_dates[:validation_split_index]
-        self._Y_dates_val = self.Y_dates[validation_split_index:]
+        Splits training and target values into training and validation split.
+        """
+        (self._X_train, self._X_val, self._Y_train, self._Y_val,
+         self._X_dates_train, self._X_dates_val, self._Y_dates_train, self._Y_dates_val
+         ) = preprocessing.create_train_validation_split(X=self.X,
+                                                         Y=self.Y,
+                                                         X_dates=self.X_dates,
+                                                         Y_dates=self.Y_dates,
+                                                         verbose=self.verbose,
+                                                         validation_split=self.validation_split)
 
     def plot_train_validation_overview(self):
         """ Plot training and validation data highlighted by colors. """
@@ -1027,7 +979,7 @@ class LSTMPredictor:
 
     def predict(self, input_values: Union[pd.Series, np.array],
                 input_dates: np.array = None,
-                dtype=Literal['pandas', 'numpy'],
+                dtype: Literal['pandas', 'numpy'] = 'numpy',
                 return_tendency: bool = False,):
         """ Predict prices on new values. """
         try:
