@@ -37,6 +37,198 @@ class Normaliser():
             "Please use fit_transform first so this instance remembers the respective std. and mean values!")
         return (x * self.sd) + self.mu
 
+### Data manipulation functions
+def time_interpolation_new_sampling_rate(df: Union[pd.DataFrame, pd.Series], interpolation_column: str,
+                                         datetime_column: str,
+                                         new_sampling_rate: str = '1min',
+                                         custom_start_hour: int = None, custom_start_minute: int = None,
+                                         df_lowest_time_unit: Literal['15min', '1min', '1sec'] = '1min',
+                                         verbose=False,
+                                         save_path=None, save_title_identifier: str = None,
+                                         new_price_column_label: str = 'close',
+                                         exclude_non_operating_hours=True, manual_operating_hours: (int, int) = None,
+                                         exclude_weekends=True):
+    """
+    Interpolate samples of a dataframe to fit a new (higher) sampling rate.
+
+    Allows to specify start point of interpolated series besides imported data starting point through
+    custom_start_hour and custom_start_minute.
+
+    Respects weekends (if exclude_weekends) and operating hours (if exclude_non_operating_hours, also manually possible with manual_operating_hours e.g. = (9, 18)).
+    """
+    # prepare data
+    if isinstance(df, pd.DataFrame):
+        df = df.loc[:, [datetime_column, interpolation_column]].copy()
+    else:
+        df = pd.DataFrame(df.copy()).reset_index()
+    df[datetime_column] = pd.to_datetime(df[datetime_column])
+    df.set_index(datetime_column, inplace=True)
+
+    # create optimal datetime index:
+    date_start = df.index.min()
+    # eventually change starting hour and minute, if such arguments are None, replace yields the unchanged timestamp
+    date_start = date_start.replace(hour=custom_start_hour, minute=custom_start_minute)
+    optimal_date_range = pd.date_range(date_start, df.index.max(), freq=new_sampling_rate)
+    if exclude_weekends:  # exclude weekends
+        optimal_date_range = optimal_date_range[~optimal_date_range.weekday.isin([5, 6])]
+        if verbose:  print("Excluded every entry on Saturday or Sunday.")
+    if exclude_non_operating_hours:  # exclude non-operating hours
+        operating_hours = (
+            df.index.hour.min(), df.index.hour.max()) if manual_operating_hours is None else manual_operating_hours
+        optimal_date_range = optimal_date_range[
+            ~ ((optimal_date_range.hour >= operating_hours[1]) | (optimal_date_range.hour < operating_hours[0]))]
+        if verbose: print(f"Excluded every entry before hour {operating_hours[0]} and after hour {operating_hours[1]}.")
+
+    # below we will join the new datetime indices with the existing ones:
+    #   how='left' (default) leads to keeping only new indices, if sampling_rate_to_be_interpolated is too low, information is lost
+    #   how='outer' can mitigate this, however then different sample rates remain: might be reasonable for interpolation but should then be removed again
+    # we check for this necessity with the outer_join_necessary bool:
+    outer_join_necessary = (new_sampling_rate != df_lowest_time_unit)
+    if verbose and outer_join_necessary:
+        print(
+            f"New sampling rate ({new_sampling_rate}) is higher than current lowest time unit ({df_lowest_time_unit}).\nTherefore some existing indices will be removed to match the new sampling rate, while all information will be kept through the interpolation procedure.")
+    how_to_join = 'outer' if outer_join_necessary else 'left'
+    interpolated_prices = pd.DataFrame(data=None,
+                                       index=optimal_date_range)  # new dataframe as scaffold for future interpolated prices
+    interpolated_prices = interpolated_prices.join(df[interpolation_column], how=how_to_join)  # join prices
+
+    # interpolation:
+    #   we use 'time' interpolation because we have unevenly spaced time indices in the original time-series
+    #   if time-indices are equally spaced, 'time' becomes equivalent to 'linear' interpolation
+    interpolated_prices = interpolated_prices.interpolate(method='time')
+
+    # if we used 'outer' join, we now need to remove the unequally spaced indices:
+    if outer_join_necessary:
+        interpolated_prices = interpolated_prices.loc[interpolated_prices.index.isin(optimal_date_range)]
+
+    # renaming:
+    interpolated_prices.rename(columns={interpolation_column: new_price_column_label}, inplace=True)
+    interpolated_prices.index.name = datetime_column
+
+    # save data:
+    if save_path is not None:
+        date_range_string = f"{interpolated_prices.index.min().strftime('%Y-%m-%d')} to {interpolated_prices.index.max().strftime('%Y-%m-%d')}"
+        save_title = filemgmt.file_title(
+            title=f"{f' {save_title_identifier} ' if save_title_identifier is not None else ''}Interpolated Prices at {new_sampling_rate} from {date_range_string}",
+            dtype_suffix=".csv")
+        interpolated_prices.to_csv(save_path / save_title)
+
+    return interpolated_prices
+
+
+def create_rolling_window_view(input_series: pd.Series,
+                               rolling_window_size: int, forecast_horizon: int = 1,
+                               daily_prediction_hour: int = None, sampling_rate_minutes: int = 15,
+                               predict_before_daily_prediction_hour: bool = False,
+                               verbose=False):
+    """
+    Creates a rolling window matrix of training data and target values based on a time-series with datetime index.
+    Uses subsequent prices as target values, i.e. autoregressive prediction.
+
+    Columns of training data are defined by rolling_window_size, columns of target data by forecast_horizon.
+
+    For intra-day predictions, the method allows for defining the ending point of each rolling window (and
+    hence starting point of target values) with daily_prediction_hour. E.g. daily_prediction_hour=15 will lead
+    to the targets always starting at the first sample after 3 pm.
+    This further requires specifying sampling_rate_minutes to find the first entry in that prediction hour.
+    """
+    # sliding window view as matrix: last column are current prices, 1st to (rolling-window-size - 1)th column are retrospective prices:
+    X = np.lib.stride_tricks.sliding_window_view(input_series.to_numpy(),
+                                                       window_shape=rolling_window_size)[
+              :-forecast_horizon]  # last rows (latest values) are removed (because contained only in target values)
+    X_dates = np.lib.stride_tricks.sliding_window_view(input_series.index.to_numpy(),
+                                                             window_shape=rolling_window_size)[
+                    :-forecast_horizon]
+
+    # target values are subsequent prices, window size here is referred to as the forecast_horizon:
+    Y = np.lib.stride_tricks.sliding_window_view(input_series.to_numpy(),
+                                                       window_shape=forecast_horizon)[
+              rolling_window_size:]  # first rows (earliest values) are removed (because contained only in training values)
+    Y_dates = np.lib.stride_tricks.sliding_window_view(input_series.index.to_numpy(),
+                                                             window_shape=forecast_horizon)[
+                    rolling_window_size:]  # first rows (earliest values) are removed (because contained only in training values)
+    if verbose: print(
+        f"Created rolling window view based on rolling_window_size of {rolling_window_size} and forecast_horizon of {forecast_horizon} with a time unit of {sampling_rate_minutes} minutes.")
+
+    if daily_prediction_hour is not None:
+        # specify prediction start mask:
+        target_date_index = input_series[
+                            rolling_window_size:-forecast_horizon + 1].index  # first and last rows are removed here according to the rolling windows
+        if sampling_rate_minutes >= 60:  # if sampling rate larger than 1 hour, no need for minute check:
+            prediction_start_mask = (target_date_index.hour == daily_prediction_hour)
+            if verbose: print(
+                f"Target values start at only observation between {daily_prediction_hour}:00 and {daily_prediction_hour+1}:00 daily.")
+        else:  # check also for minute of observation:
+            if predict_before_daily_prediction_hour:  # predict at last observation before prediction hour
+                prediction_start_mask = (target_date_index.hour == daily_prediction_hour - 1) & (
+                        target_date_index.minute >= (
+                            60 - sampling_rate_minutes))  # last observation before prediction_hour
+                if verbose: print(
+                    f"Target values start at last observation before {daily_prediction_hour}:00 daily.")
+            else:  # predict at first observation in prediction_hour
+                prediction_start_mask = (target_date_index.hour == daily_prediction_hour) & (
+                        target_date_index.minute < sampling_rate_minutes)  # first observation in prediction_hour
+                if verbose: print(
+                    f"Target values start at first observation after {daily_prediction_hour}:00 daily.")
+
+        # select only training values related to target values starting at the specified prediction time:
+        X = X[prediction_start_mask]
+        Y = Y[prediction_start_mask]
+        X_dates = X_dates[prediction_start_mask]
+        Y_dates = Y_dates[prediction_start_mask]
+
+        # status message and sanity check:
+        if len(X) > 0:
+            print(f"Resulting dataset consists of {len(X)} observations.")
+        else:
+            raise ValueError(f"No observations remain after choosing observations according to prediction hour of {daily_prediction_hour}.\nThis can be due to wrong specification of the sampling rate (currently {sampling_rate_minutes} min)!")
+
+    return X, Y, X_dates, Y_dates
+
+
+def create_train_validation_split(X: np.ndarray, Y: np.ndarray,
+                                  X_dates: np.ndarray, Y_dates: np.ndarray,
+                                  validation_split: float = 0.2,
+                                  verbose: bool = False):
+    """
+    Splits training and target values into training and validation split.
+
+    Returns tuple with X_train, X_val, Y_train, Y_val, X_dates_train, X_dates_val, Y_dates_train, Y_dates_val.
+    """
+    validation_split_index = int(X.shape[0] * (1 - validation_split))
+    X_train = X[:validation_split_index]
+    X_val = X[validation_split_index:]
+    Y_train = Y[:validation_split_index]
+    Y_val = Y[validation_split_index:]
+    if verbose: print(
+        f"Using last {100 * validation_split}% of data for validation. Other data for training.")
+    if verbose: print(
+        f"This yields {len(X_train)} training and {len(X_val)} validation observations.")
+
+    # split respective dates:
+    X_dates_train = X_dates[:validation_split_index]
+    X_dates_val = X_dates[validation_split_index:]
+    Y_dates_train = Y_dates[:validation_split_index]
+    Y_dates_val = Y_dates[validation_split_index:]
+
+    return X_train, X_val, Y_train, Y_val, X_dates_train, X_dates_val, Y_dates_train, Y_dates_val
+
+
+
+
+
+### Data download functions
+def read_price_csv(csv_path: str, date_column: str = "date", price_column: str = "close") -> pd.DataFrame:
+    """ Read price csv file. Static method to be used also in other classes. """
+    # import csv w correct dtypes:
+    price_file = pd.read_csv(csv_path).dropna(axis=0)
+    try:
+        price_file[date_column] = pd.to_datetime(price_file[date_column])
+    except KeyError:  # if the csv has no name for its index:
+        price_file[date_column] = pd.to_datetime(price_file['Unnamed: 0'])
+    price_file[price_column] = price_file[price_column].astype(float)
+    return price_file.set_index(date_column)[price_column]
+
 
 def get_data_from_yahoo(ticker: str = '^GDAXI', duration_days: int = None, sampling_rate_minutes: int = None,
                         sampling_rate_days: int = 1, verbose=True, m_avg_days=[5, 30, 90],
@@ -205,81 +397,3 @@ def get_data_from_alphavantage(api_key: str,
         return price_frame
 
     return price_frame
-
-
-def time_interpolation_new_sampling_rate(df: Union[pd.DataFrame, pd.Series], interpolation_column: str,
-                                         datetime_column: str,
-                                         new_sampling_rate: str = '1min',
-                                         custom_start_hour: int = None, custom_start_minute: int = None,
-                                         df_lowest_time_unit: Literal['1min', '1sec'] = '1min',
-                                         verbose=False,
-                                         save_path=None, save_title_identifier: str = None,
-                                         new_price_column_label: str = 'close',
-                                         exclude_non_operating_hours=True, manual_operating_hours: (int, int) = None,
-                                         exclude_weekends=True):
-    """
-    Interpolate samples of a dataframe to fit a new (higher) sampling rate.
-
-    Allows to specify start point of interpolated series besides imported data starting point through
-    custom_start_hour and custom_start_minute.
-
-    Respects weekends (if exclude_weekends) and operating hours (if exclude_non_operating_hours, also manually possible with manual_operating_hours e.g. = (9, 18)).
-    """
-    # prepare data
-    if isinstance(df, pd.DataFrame):
-        df = df.loc[:, [datetime_column, interpolation_column]].copy()
-    else:
-        df = pd.DataFrame(df.copy()).reset_index()
-    df[datetime_column] = pd.to_datetime(df[datetime_column])
-    df.set_index(datetime_column, inplace=True)
-
-    # create optimal datetime index:
-    date_start = df.index.min()
-    # eventually change starting hour and minute, if such arguments are None, replace yields the unchanged timestamp
-    date_start = date_start.replace(hour=custom_start_hour, minute=custom_start_minute)
-    optimal_date_range = pd.date_range(date_start, df.index.max(), freq=new_sampling_rate)
-    if exclude_weekends:  # exclude weekends
-        optimal_date_range = optimal_date_range[~optimal_date_range.weekday.isin([5, 6])]
-        if verbose:  print("Excluded every entry on Saturday or Sunday.")
-    if exclude_non_operating_hours:  # exclude non-operating hours
-        operating_hours = (
-            df.index.hour.min(), df.index.hour.max()) if manual_operating_hours is None else manual_operating_hours
-        optimal_date_range = optimal_date_range[
-            ~ ((optimal_date_range.hour >= operating_hours[1]) | (optimal_date_range.hour < operating_hours[0]))]
-        if verbose: print(f"Excluded every entry before hour {operating_hours[0]} and after hour {operating_hours[1]}.")
-
-    # below we will join the new datetime indices with the existing ones:
-    #   how='left' (default) leads to keeping only new indices, if sampling_rate_to_be_interpolated is too low, information is lost
-    #   how='outer' can mitigate this, however then different sample rates remain: might be reasonable for interpolation but should then be removed again
-    # we check for this necessity with the outer_join_necessary bool:
-    outer_join_necessary = (new_sampling_rate != df_lowest_time_unit)
-    if verbose and outer_join_necessary:
-        print(
-            f"New sampling rate ({new_sampling_rate}) is higher than current lowest time unit ({df_lowest_time_unit}).\nTherefore some existing indices will be removed to match the new sampling rate, while all information will be kept through the interpolation procedure.")
-    how_to_join = 'outer' if outer_join_necessary else 'left'
-    interpolated_prices = pd.DataFrame(data=None,
-                                       index=optimal_date_range)  # new dataframe as scaffold for future interpolated prices
-    interpolated_prices = interpolated_prices.join(df[interpolation_column], how=how_to_join)  # join prices
-
-    # interpolation:
-    #   we use 'time' interpolation because we have unevenly spaced time indices in the original time-series
-    #   if time-indices are equally spaced, 'time' becomes equivalent to 'linear' interpolation
-    interpolated_prices = interpolated_prices.interpolate(method='time')
-
-    # if we used 'outer' join, we now need to remove the unequally spaced indices:
-    if outer_join_necessary:
-        interpolated_prices = interpolated_prices.loc[interpolated_prices.index.isin(optimal_date_range)]
-
-    # renaming:
-    interpolated_prices.rename(columns={interpolation_column: new_price_column_label}, inplace=True)
-    interpolated_prices.index.name = datetime_column
-
-    # save data:
-    if save_path is not None:
-        date_range_string = f"{interpolated_prices.index.min().strftime('%Y-%m-%d')} to {interpolated_prices.index.max().strftime('%Y-%m-%d')}"
-        save_title = filemgmt.file_title(
-            title=f"{f' {save_title_identifier} ' if save_title_identifier is not None else ''}Interpolated Prices at {new_sampling_rate} from {date_range_string}",
-            dtype_suffix=".csv")
-        interpolated_prices.to_csv(save_path / save_title)
-
-    return interpolated_prices
