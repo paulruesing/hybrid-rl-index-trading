@@ -305,6 +305,7 @@ def get_data_from_alphavantage(api_key: str,
                                start_year_month: (int, int) = None, end_year_month: (int, int) = None,
                                sampling_rate: Literal['1min', '5min', '15min', '30min', '60min'] = '1min',
                                price_column: Literal["1. open", "2. high", "3. low", "4. close"] = '4. close',
+                               time_increment: str = None, time_decrement: str = None,
                                csv_path_to_concat: str = None,
                                save_path=None) -> pd.DataFrame:
     """
@@ -320,6 +321,10 @@ def get_data_from_alphavantage(api_key: str,
         Sampling rate of data. Options: '1min', '5min', '15min', '30min', '60min'
     :param price_column: str, default = "4. close"
         Which of the downloaded columns to utilise as price data. Options: "1. open", "2. high", "3. low", "4. close"
+    :param time_increment: str, optional
+        Time-zone adjustment. Will be added to date column. E.g. '6h' for adjusting from UCT-4 (New York) to UCT+2 (Frankfurt)
+    :param time_decrement: str, optional
+        Time-zone adjustment. Will be subtracted from date column.
     :param csv_path_to_concat: str, optional
         Path to csv file from previous download which should be extended.
     :param save_path: str, optional
@@ -381,6 +386,12 @@ def get_data_from_alphavantage(api_key: str,
             temp_price_frame = \
             ts.get_intraday(ticker, extended_hours=False, interval=sampling_rate, month=year_month, outputsize="full")[
                 0]
+
+            # eventually adjust for foreign time-zone:
+            temp_price_frame['date'] = pd.to_datetime(temp_price_frame['date'])
+            if time_increment is not None: temp_price_frame['date'] + pd.Timedelta(time_increment)
+            if time_decrement is not None: temp_price_frame['date'] - pd.Timedelta(time_decrement)
+
             price_frame = pd.concat([price_frame, temp_price_frame])
         except ValueError as err:  # occurs if capacity for free queries is exhausted
             print(err)
