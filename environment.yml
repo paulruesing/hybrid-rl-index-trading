@@ -17,6 +17,7 @@ dependencies:
   - pip:
       - notebook
       - gym
+      - selenium
       - stable-baselines3
       - shimmy
       - rich
