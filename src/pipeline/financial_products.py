@@ -21,7 +21,6 @@ import src.utils.str_conversion as strconv
 
 class FutureProduct:
     """ Models the price evolution of a future financial product. """
-
     def __init__(self,
                  underlying_price_series: pd.Series,
                  isin: str = None,
@@ -72,10 +71,11 @@ class FutureProduct:
             Path to executable driver for Selenium product info scrape. Often not necessary, system can try to automatically locate it.
         """
         # convert underlying price array to pd.Series with DatetimeIndex:
-        self.underlying_price_series = underlying_price_series if isinstance(underlying_price_series,
+        self._underlying_price_series = underlying_price_series if isinstance(underlying_price_series,
                                                                              pd.Series) else pd.Series(
             underlying_price_series.iloc[:, 0])
-        self.underlying_price_series.index = pd.to_datetime(underlying_price_series.index)
+        self._underlying_price_series.index = pd.to_datetime(underlying_price_series.index)
+        self.issue_date = issue_date
 
         # if provided, overwrite all parameters through web scrape:
         if isin is not None and scrape_data_if_possible:
@@ -90,13 +90,8 @@ class FutureProduct:
         self._historic_date_future_price_tuple = historic_date_future_price_tuple
         self.subscription_ratio = subscription_ratio
 
-        # consider issue date:
-        self.issue_date = issue_date
-        if self.issue_date is not None:
-            if self.underlying_price_series.index.min() < pd.Timestamp(self.issue_date):
-                self.underlying_price_series = self.underlying_price_series[self.issue_date:]
-
         # private attributes for properties:
+        self._is_ko_series = None
         self._base_price_series = self._intrinsic_value_series = None
 
         # if provided, overwrite 2nd base price:
@@ -126,18 +121,16 @@ class FutureProduct:
         date = pd.Timestamp(date)
         if date.hour == 0: date = date.replace(hour=10)  # prevent errors if no hour was provided
         if self.direction == "long":
-            base_price = (self.risk_premium - future_price) / self.subscription_ratio + self.underlying_price_series[
-                date]
+            base_price = (self.risk_premium - future_price) / self.subscription_ratio + self.underlying_price_series[date]
         else:  # for short
-            base_price = (future_price - self.risk_premium) / self.subscription_ratio + self.underlying_price_series[
-                date]
+            base_price = (future_price - self.risk_premium) / self.subscription_ratio + self.underlying_price_series[date]
 
         # eventually rewrite 2nd base price tuple for recalculation of base price series:
         if use_as_2nd_base_price_tuple: self.date_base_price_tuple2 = (date, base_price)
 
         return base_price
 
-    def plot(self, plot_size=(10, 10), leverage_lim=[1, 5]) -> None:
+    def plot(self, plot_size=(10, 10), leverage_lim=(0, 5)) -> None:
         """ Plot price and leverage development. """
         fig, (ax, ax3) = plt.subplots(2, 1, figsize=plot_size)
         ax2 = ax.twinx()
@@ -149,7 +142,7 @@ class FutureProduct:
 
         # plot leverage:
         ax3.plot(self.date_index, self.leverage_series, color='red', label='Leverage')
-        ax.legend(loc='upper left');
+        ax.legend(loc='upper left')
         ax2.legend(loc='lower right')
         ax3.set_ylabel('Leverage [x]')
         ax3.set_xlabel('Date')
@@ -169,7 +162,7 @@ class FutureProduct:
     def describe(self) -> str:
         intro_str = "------------------- FutureProduct Instance -------------------\n\n"
         data_str = f"Price Data Attributes:\n- start date: {self.date_index.min().strftime('%Y-%m-%d')}{' (equals issue date of product)' if self.issue_date is not None else ''}\n- end date: {self.date_index.max().strftime('%Y-%m-%d')}\n\n"
-        product_str = f"Product Attributes:\n{f'- ISIN: {self.isin}\n- last base price: {self.base_price_series.iloc[-1]}\n' if self.isin is not None else ''}- type: {self.direction}\n- last leverage: {self.leverage_series.iloc[-1]}\n- risk premium (absolute): {self.risk_premium}\n- subscription ratio: {self.subscription_ratio}\n- current price: {self.price_series.iloc[-1]}\n\n"
+        product_str = f"Product Attributes:\n{f'- ISIN: {self.isin}\n- last base price: {self.base_price_series.iloc[-1]}\n' if self.isin is not None else ''}- type: {self.direction}\n- last leverage: {self.leverage_series.iloc[-1]}\n- risk premium (absolute): {self.risk_premium}\n- subscription ratio: {self.subscription_ratio}\n- current price: {self.price_series.iloc[-1]}\n- reached KO: {self.is_ko_series.iloc[-1]}\n\n"
         return intro_str + data_str + product_str
 
     ### Base price properties ###
@@ -188,6 +181,11 @@ class FutureProduct:
     @date_base_price_tuple.setter
     def date_base_price_tuple(self, value):
         """ Setting attribute triggers re-computation of base_price_series """
+        if isinstance(value[0], str):
+            date_str = value[0]
+            if len(date_str) <= 10:
+                date_str += " 12:00:00"  # add time suffix if necessary
+                value = (date_str, value[1])
         self._date_base_price_tuple = value
         self._base_price_series = None
 
@@ -206,6 +204,11 @@ class FutureProduct:
     @date_base_price_tuple2.setter
     def date_base_price_tuple2(self, value):
         """ Setting attribute triggers re-computation of base_price_series """
+        if isinstance(value[0], str):
+            date_str = value[0]
+            if len(date_str) <= 10:
+                date_str += " 12:00:00"  # add time suffix if necessary
+                value = (date_str, value[1])
         self._date_base_price_tuple2 = value
         self._base_price_series = None
 
@@ -265,6 +268,12 @@ class FutureProduct:
 
     ### General properties ###
     @property
+    def is_ko_series(self):
+        """ True if product breached KO price. """
+        _ = self.price_series  # KO is checked during price calculation
+        return self._is_ko_series
+
+    @property
     def direction(self) -> Literal['long', 'short']:
         """
         Indicates whether the product is currently 'long' or 'short' based on final values.
@@ -274,10 +283,8 @@ class FutureProduct:
         str
             'long' if underlying > base price, 'short' if underlying < base price.
         """
-        if self.underlying_price_series.iloc[-1] > self.base_price_series.iloc[-1]:
-            return 'long'
-        elif self.underlying_price_series.iloc[-1] < self.base_price_series.iloc[-1]:
-            return 'short'
+        if self.underlying_price_series.iloc[0] > self.base_price_series.iloc[0]: return 'long'
+        else: return 'short'
 
     @property
     def leverage_series(self) -> pd.Series:
@@ -291,8 +298,8 @@ class FutureProduct:
         """
         return pd.Series(index=self.date_index,
                          # numpy to accelerate computation:
-                         data=np.array(self.underlying_price_series) * self.subscription_ratio / np.array(
-                             self.price_series),
+                         data=(np.array(self.underlying_price_series) * self.subscription_ratio / np.array(
+                             self.price_series) * np.array(~self.is_ko_series)),
                          name='Leverage')
 
     @property
@@ -309,20 +316,38 @@ class FutureProduct:
 
     ### Price calculation ###
     @property
+    def underlying_price_series(self):
+        """ Underlying price series, considers issue_date attribute."""
+        if self.issue_date is not None:
+            if self._underlying_price_series.index.min() < pd.Timestamp(self.issue_date):
+                return self._underlying_price_series[self.issue_date:]  # return prices starting at issue date
+        else: return self._underlying_price_series  # return all provided prices
+
+    @property
     def intrinsic_value_series(self):
         """
         Time series of the product's intrinsic value, which is
-        (underlying - base price) * subscription ratio.
+        (underlying - base price) * subscription ratio. Includes KO check.
 
         Returns
         -------
         pd.Series
             Intrinsic value per date.
         """
+        intrinsic_value_array = np.abs(np.array(self.underlying_price_series) - np.array(
+                             self.base_price_series)) * self.subscription_ratio
+
+        # check for knockout event:
+        ko_mask = (self.base_price_series >= self.underlying_price_series)
+        ko_index = np.argmax(self.base_price_series >= self.underlying_price_series)
+        if ko_index != 0:  # 0 is also returned if no True is found in the mask
+            ko_mask.iloc[ko_index:] = True  # KO is final
+            intrinsic_value_array[ko_index:] = 0  # price remains at risk_premium after KO breach
+        self._is_ko_series = ko_mask
+
         return pd.Series(index=self.date_index,
                          # numpy to accelerate computation:
-                         data=np.abs(np.array(self.underlying_price_series) - np.array(
-                             self.base_price_series)) * self.subscription_ratio,
+                         data=intrinsic_value_array,
                          name='Intrinsic Value')
 
     @property
@@ -336,15 +361,16 @@ class FutureProduct:
         pd.Series
             Final product prices over time.
         """
+        price_array = np.array(self.intrinsic_value_series) + self.risk_premium
+
+        # return as Series:
         return pd.Series(index=self.date_index,
-                         # numpy to accelerate computation:
-                         data=np.array(self.intrinsic_value_series) + self.risk_premium,
-                         name='Future Price')
+                  data=price_array,
+                  name='Future Price')
 
 
 def fetch_future_info_from_boerse_fra(isin: str, driver_executable_path: str):
     """ Scrape risk premium, subscription ratio, base price and issue date for future product based on ISIN. """
-
     # auxiliary functions:
     def highlight_element(element):
         driver.execute_script(
