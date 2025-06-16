@@ -1,8 +1,8 @@
 # Hybrid RL Index Trading
 
 This repository aims to leverage **supervised learning (based on time-series and language analysis)** and **reinforcement
-learning (for decision-making)** for algorithmic **index trading**. Such combination (**hybrid RL**) is expected to harvest
-synergies and be preferable to either such single architectures.
+learning (for decision-making)** for algorithmic **index trading**. This combination (**hybrid RL**) is expected to harvest
+synergies and be more effective than either single architecture alone.
 
 The code was developed in my free-time and is continuously improved.
 
