@@ -20,7 +20,7 @@ import src.pipeline.preprocessing as preprocessing
 import src.utils.str_conversion as strconv
 
 
-class FutureProduct:
+class KOCertificate:
     """ Models the price evolution of a future financial product. """
     def __init__(self,
                  underlying_price_series: pd.Series,
@@ -182,8 +182,6 @@ class FutureProduct:
             ax.plot(self.date_base_price_tuple[0], self.date_base_price_tuple[1], 'ro', label='Base Price Anchor Point 1')
         if self.date_base_price_tuple2 is not None:
             ax.plot(self.date_base_price_tuple2[0], self.date_base_price_tuple2[1], 'mo', label='Base Price Anchor Point 2')
-
-        ax2 = ax.twinx()
         ax2.plot(self.date_index, self.price_series, color='green', label='Future Price')
         ax.set_ylabel('Price [€]')
         ax2.set_ylabel('Price [€]')
@@ -206,9 +204,30 @@ class FutureProduct:
             lowest_date = self.date_index[np.argmin(self.underlying_price_series)]
             lowest_price = self.underlying_price_series.min()
             self.date_base_price_tuple2 = (lowest_date, lowest_price * (1.05 if self.direction == 'short' else 0.95))
+
+    def enforce_base_price_increase_per_annum(self, abs_increase_pa: float = .02) -> None:
+        """ Enforce defined base price increase rate by keeping the lower (higher for shorts) base_price anchor point and changing the other. """
+        # sign based on product's direction
+        price_change_pa = np.abs(abs_increase_pa) * (-1 if self.direction == 'short' else 1)
+
+        if (self.direction == 'short' and self.date_base_price_tuple[1] > self.date_base_price_tuple2[1]) or (
+                self.direction == 'long' and self.date_base_price_tuple[1] < self.date_base_price_tuple2[1]):
+            # in this case, the first tuple is the one to be kept:
+            try:  # set second date one year ahead:
+                date2 = self.date_base_price_tuple[0] + pd.Timedelta('364d')  # 364 equals exactly 52 weeks
+                _ = self.underlying_price_series[date2]
+            except KeyError:  # if +1 Year is beyond provided data, set date back one year:
+                date2 = self.date_base_price_tuple[0] - pd.Timedelta('364d')
+            self.date_base_price_tuple2 = (date2, self.date_base_price_tuple[1] * (1 + price_change_pa))
+
         else:
-            # print('[INFO] No initial KO breach found.')
-            pass
+            # in this case, keep the second:
+            try:  # set second date one year ahead:
+                date = self.date_base_price_tuple2[0] + pd.Timedelta('364d')  # 364 equals exactly 52 weeks
+                _ = self.underlying_price_series[date]  # try accessing date
+            except KeyError:  # if +1 Year is beyond provided data, set date back one year:
+                date = self.date_base_price_tuple2[0] - pd.Timedelta('364d')
+            self.date_base_price_tuple = (date, self.date_base_price_tuple2[1] * (1 + price_change_pa))
 
     ### String representation ###
     def __str__(self) -> str:
@@ -218,7 +237,7 @@ class FutureProduct:
         return self.describe()
 
     def describe(self) -> str:
-        intro_str = "------------------- FutureProduct Instance -------------------\n\n"
+        intro_str = "------------------- KOCertificate Instance -------------------\n\n"
         data_str = f"Price Data Attributes:\n- start date: {self.date_index.min().strftime('%Y-%m-%d')}{' (equals issue date of product)' if self.issue_date is not None else ''}\n- end date: {self.date_index.max().strftime('%Y-%m-%d')}\n\n"
         product_str = f"Product Attributes:\n{f'- ISIN: {self.isin}\n- last base price: {self.base_price_series.iloc[-1]}\n' if self.isin is not None else ''}- type: {self.direction}\n- last leverage: {self.leverage_series.iloc[-1]}\n- risk premium (absolute): {self.risk_premium}\n- subscription ratio: {self.subscription_ratio}\n- current price: {self.price_series.iloc[-1]}\n- reached KO: {self.is_ko_series.iloc[-1]}\n\n"
         return intro_str + data_str + product_str
