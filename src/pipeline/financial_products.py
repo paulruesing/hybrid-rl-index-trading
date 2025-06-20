@@ -205,29 +205,49 @@ class KOCertificate:
             lowest_price = self.underlying_price_series.min()
             self.date_base_price_tuple2 = (lowest_date, lowest_price * (1.05 if self.direction == 'short' else 0.95))
 
+    # todo: simplify try/except structure, make coherent with base_price_series property and base_price_change_per_annum
     def enforce_base_price_increase_per_annum(self, abs_increase_pa: float = .02) -> None:
         """ Enforce defined base price increase rate by keeping the lower (higher for shorts) base_price anchor point and changing the other. """
         # sign based on product's direction
         price_change_pa = np.abs(abs_increase_pa) * (-1 if self.direction == 'short' else 1)
 
+        # if short product and the first base price inference point is higher or long product and second inference point is higher,
+        # keep the first inference point:
         if (self.direction == 'short' and self.date_base_price_tuple[1] > self.date_base_price_tuple2[1]) or (
                 self.direction == 'long' and self.date_base_price_tuple[1] < self.date_base_price_tuple2[1]):
+
             # in this case, the first tuple is the one to be kept:
             try:  # set second date one year ahead:
                 date2 = self.date_base_price_tuple[0] + pd.Timedelta('364d')  # 364 equals exactly 52 weeks
                 _ = self.underlying_price_series[date2]
+                is_one_month = False
             except KeyError:  # if +1 Year is beyond provided data, set date back one year:
-                date2 = self.date_base_price_tuple[0] - pd.Timedelta('364d')
-            self.date_base_price_tuple2 = (date2, self.date_base_price_tuple[1] * (1 + price_change_pa))
+                try:
+                    date2 = self.date_base_price_tuple[0] - pd.Timedelta('364d')
+                    _ = self.underlying_price_series[date2]
+                    is_one_month = False
+                except KeyError:
+                    date2 = self.date_base_price_tuple[0] - pd.Timedelta('28d')
+                    _ = self.underlying_price_series[date2]
+                    is_one_month = True  # smaller timedelta (half year) leads to smaller base price change in below formula:
 
+            self.date_base_price_tuple2 = (date2, self.date_base_price_tuple[1] * ((1 + price_change_pa) ** (1/12 if is_one_month else 1)))
         else:
             # in this case, keep the second:
             try:  # set second date one year ahead:
                 date = self.date_base_price_tuple2[0] + pd.Timedelta('364d')  # 364 equals exactly 52 weeks
                 _ = self.underlying_price_series[date]  # try accessing date
+                is_one_month = False
             except KeyError:  # if +1 Year is beyond provided data, set date back one year:
-                date = self.date_base_price_tuple2[0] - pd.Timedelta('364d')
-            self.date_base_price_tuple = (date, self.date_base_price_tuple2[1] * (1 + price_change_pa))
+                try:
+                    date = self.date_base_price_tuple2[0] - pd.Timedelta('364d')
+                    _ = self.underlying_price_series[date]
+                    is_one_month = False
+                except KeyError:
+                    date = self.date_base_price_tuple2[0] - pd.Timedelta('28d')
+                    _ = self.underlying_price_series[date]
+                    is_one_month = True  # smaller timedelta (half year) leads to smaller base price change in below formula:
+            self.date_base_price_tuple = (date, self.date_base_price_tuple2[1] * ((1 + price_change_pa) ** (1/12 if is_one_month else 1)))
 
     ### String representation ###
     def __str__(self) -> str:
@@ -303,9 +323,15 @@ class KOCertificate:
             try:  # look one year ahead:
                 end = self.base_price_series[
                     self.date_base_price_tuple[0] + pd.Timedelta('364d')]  # 364 equals exactly 52 weeks
+                is_one_month = False
             except KeyError:  # if +1 Year is beyond provided data, look back one year:
-                end = self.base_price_series[self.date_base_price_tuple[0] - pd.Timedelta('364d')]
-            self._base_price_change_per_annum = (end / start - 1).item()
+                try:
+                    end = self.base_price_series[self.date_base_price_tuple[0] - pd.Timedelta('364d')]
+                    is_one_month = False
+                except KeyError:  # if 1 year is too large look 1 month
+                    end = self.base_price_series[self.date_base_price_tuple[0] - pd.Timedelta('28d')]
+                    is_one_month = True
+            self._base_price_change_per_annum = (end / start).item() ** (12 if is_one_month else 1) - 1  # if difference is from one month, convert to annual rate
         else:  # correct direction if attribute has already been provided
             self._base_price_change_per_annum = (np.abs(self._base_price_change_per_annum) * (-1 if self.direction == 'short' else 1)).item()
         return self._base_price_change_per_annum
@@ -330,9 +356,18 @@ class KOCertificate:
                 try:  # set second date one year ahead:
                     date2 = self.date_base_price_tuple[0] + pd.Timedelta('364d')  # 364 equals exactly 52 weeks
                     _ = self.underlying_price_series[date2]
+                    is_one_month = False
                 except KeyError:  # if +1 Year is beyond provided data, set date back one year:
-                    date2 = self.date_base_price_tuple[0] - pd.Timedelta('364d')
-                self._date_base_price_tuple2 = (date2, self.date_base_price_tuple[1] * (1 + self.base_price_change_per_annum))
+                    try:
+                        date2 = self.date_base_price_tuple[0] - pd.Timedelta('364d')
+                        _ = self.underlying_price_series[date2]
+                        is_one_month = False
+                    except KeyError:
+                        date2 = self.date_base_price_tuple[0] - pd.Timedelta('28d')
+                        _ = self.underlying_price_series[date2]
+                        is_one_month = True  # smaller timedelta (4 weeks) leads to smaller base price change in below formula:
+
+                self._date_base_price_tuple2 = (date2, self.date_base_price_tuple[1] * ((1 + self.base_price_change_per_annum) ** (1/12 if is_one_month else 1)))
 
             provided_dates = [self.date_index.get_loc(date) for date in
                               [self.date_base_price_tuple[0], self.date_base_price_tuple2[0]]]
