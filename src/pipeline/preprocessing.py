@@ -41,6 +41,7 @@ class Normaliser():
 def time_interpolation_new_sampling_rate(df: Union[pd.DataFrame, pd.Series], interpolation_column: str,
                                          datetime_column: str,
                                          new_sampling_rate: str = '1min',
+                                         moving_average_window_size: str = None,
                                          custom_start_hour: int = None, custom_start_minute: int = None,
                                          df_lowest_time_unit: Literal['15min', '1min', '1sec'] = '1min',
                                          verbose=False,
@@ -49,12 +50,67 @@ def time_interpolation_new_sampling_rate(df: Union[pd.DataFrame, pd.Series], int
                                          exclude_non_operating_hours=True, manual_operating_hours: (int, int) = None,
                                          exclude_weekends=True):
     """
-    Interpolate samples of a dataframe to fit a new (higher) sampling rate.
+    Interpolate a time series to a new (higher) sampling rate, with optional smoothing and filtering.
 
-    Allows to specify start point of interpolated series besides imported data starting point through
-    custom_start_hour and custom_start_minute.
+    This function resamples a time-indexed DataFrame or Series to a finer-grained time resolution
+    using time-based interpolation. Users can customize the resampling behavior through parameters
+    like custom start time, moving average smoothing, weekend exclusion, operating hours filtering,
+    and export of the resulting DataFrame.
 
-    Respects weekends (if exclude_weekends) and operating hours (if exclude_non_operating_hours, also manually possible with manual_operating_hours e.g. = (9, 18)).
+    Parameters
+    ----------
+    df : DataFrame or Series
+        Time series data containing a datetime column and the column to interpolate.
+    interpolation_column : str
+        Name of the column containing the values to interpolate.
+    datetime_column : str
+        Name of the datetime column used to index and resample the data.
+    new_sampling_rate : str, default '1min'
+        Target sampling frequency (e.g., '1min', '30s', '5min') in pandas frequency string format.
+    moving_average_window_size : str, optional
+        Window size for optional moving average smoothing after interpolation (e.g., '3min').
+    custom_start_hour : int, optional
+        Custom hour at which the interpolated time series should begin (overrides original start hour).
+    custom_start_minute : int, optional
+        Custom minute at which the interpolated time series should begin (overrides original start minute).
+    df_lowest_time_unit : {'15min', '1min', '1sec'}, default '1min'
+        Granularity of the original data; used to determine if outer join is needed during interpolation.
+    verbose : bool, default False
+        If True, prints detailed information about the interpolation and filtering steps.
+    save_path : path-like, optional
+        Directory path where the interpolated result will be saved as a CSV, if specified.
+    save_title_identifier : str, optional
+        Additional identifier for the exported file name.
+    new_price_column_label : str, default 'close'
+        Name to assign to the interpolated value column in the output.
+    exclude_non_operating_hours : bool, default True
+        Whether to exclude values outside the operating hours.
+    manual_operating_hours : tuple of (int, int), optional
+        Tuple specifying manual operating hours (start_hour, end_hour). Used if `exclude_non_operating_hours=True`.
+    exclude_weekends : bool, default True
+        Whether to exclude data points falling on Saturday or Sunday.
+
+    Returns
+    -------
+    DataFrame
+        Interpolated time series with optional smoothing and filtering applied. The index is datetime.
+
+    Notes
+    -----
+    - Time-based interpolation (`method='time'`) is used to account for uneven original timestamps.
+    - Weekend and operating hour exclusion is applied after index generation and before interpolation.
+    - If the new sampling rate is finer than the original data's granularity, an outer join is performed
+      to preserve original data before interpolation.
+    - Use `moving_average_window_size` to apply rolling mean smoothing after interpolation.
+
+    Examples
+    --------
+    >>> df = pd.DataFrame({'timestamp': [...], 'price': [...]})
+    >>> result = time_interpolation_new_sampling_rate(df, interpolation_column='price',
+    ...                                               datetime_column='timestamp',
+    ...                                               new_sampling_rate='1min',
+    ...                                               exclude_weekends=True,
+    ...                                               manual_operating_hours=(9, 17))
     """
     # prepare data
     if isinstance(df, pd.DataFrame):
@@ -101,6 +157,12 @@ def time_interpolation_new_sampling_rate(df: Union[pd.DataFrame, pd.Series], int
     if outer_join_necessary:
         interpolated_prices = interpolated_prices.loc[interpolated_prices.index.isin(optimal_date_range)]
 
+    # eventually smooth with moving average:
+    if moving_average_window_size is not None:
+        interpolated_prices = interpolated_prices.rolling(window=moving_average_window_size).mean()
+        if verbose:
+            print(f"Smoothed interpolated data using moving average with {moving_average_window_size} window.")
+
     # renaming:
     interpolated_prices.rename(columns={interpolation_column: new_price_column_label}, inplace=True)
     interpolated_prices.index.name = datetime_column
@@ -109,7 +171,7 @@ def time_interpolation_new_sampling_rate(df: Union[pd.DataFrame, pd.Series], int
     if save_path is not None:
         date_range_string = f"{interpolated_prices.index.min().strftime('%Y-%m-%d')} to {interpolated_prices.index.max().strftime('%Y-%m-%d')}"
         save_title = filemgmt.file_title(
-            title=f"{f' {save_title_identifier} ' if save_title_identifier is not None else ''}Interpolated Prices at {new_sampling_rate} from {date_range_string}",
+            title=f"{f' {save_title_identifier} ' if save_title_identifier is not None else ''}Interpolated Prices at {new_sampling_rate} {f'smoothed over {moving_average_window_size} ' if moving_average_window_size is not None else ''}from {date_range_string}",
             dtype_suffix=".csv")
         interpolated_prices.to_csv(save_path / save_title)
 
