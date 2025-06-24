@@ -1,11 +1,10 @@
 import os
 from datetime import datetime
-from multiprocessing.managers import Value
 
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Union
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
@@ -15,8 +14,6 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-import src.utils.file_management as filemgmt
-import src.pipeline.preprocessing as preprocessing
 import src.utils.str_conversion as strconv
 
 
@@ -610,3 +607,315 @@ def fetch_future_info_from_boerse_fra(isin: str, driver_executable_path: str):
     # close driver and return:
     driver.quit()
     return strconv.str_to_float(risk_premium), strconv.str_to_float(subscription_ratio), strconv.str_to_float(base_price), issue_date
+
+
+class KOCertificateSet:
+    """
+    A container class for managing and visualizing a collection of `KOCertificate` instances.
+
+    This class enables users to group multiple `KOCertificate` objects to design a comprehensive
+    set of leveraged products (e.g., certificates) for analysis or comparison. If no
+    `KOCertificate` instances are provided directly, the set can be initialized by specifying
+    leverage parameters to automatically create products.
+
+    Parameters
+    ----------
+    future_product_instances : list of KOCertificate, optional
+        A list of pre-defined `KOCertificate` objects to include in the set. If not provided,
+        the products will be automatically created using the specified leverage parameters.
+    underlying_price_series : pd.Series, optional
+        The time series of the underlying asset's price. Required if automatic product
+        generation is used.
+    base_price_inference_timestamp : str, optional
+        List of timestamps at which to infer the base price from the desired leverage.
+        Required for automatic product generation.
+    n_products_per_direction : int, optional
+        Number of products to generate per direction (long/short). Required if
+        `future_product_instances` is not provided.
+    lowest_leverage : float, optional
+        The lowest leverage value to include when generating products.
+    highest_leverage : float, optional
+        The highest leverage value to include when generating products.
+
+    Raises
+    ------
+    AttributeError
+        If `future_product_instances` is not provided and required parameters for automatic
+        initialization are missing.
+    """
+
+    def __init__(self,
+                 future_product_instances: [KOCertificate] = None,
+                 underlying_price_series: pd.Series = None,
+                 base_price_inference_timestamps: [str] = None,
+                 n_products_per_direction: int = None,
+                 lowest_leverage: float = None,
+                 highest_leverage: float = None,
+                 abs_base_price_change_threshold: float = .04,
+                 ):
+        # private attributes:
+        self._last_isin_counter = 0
+        self._long_leverage_frame = self._short_leverage_frame = self._price_frame = None  # accessible through property
+        self._isin_product_dict = None  # accessible through property
+
+        if future_product_instances is not None:  # initialise products from provided list
+            # convert product instances to list if necessary:
+            if not isinstance(future_product_instances, list): future_product_instances = [future_product_instances]
+            self._future_product_instances = future_product_instances
+        else:  # or from desired leverages:
+            # sanity check:
+            if underlying_price_series is None or n_products_per_direction is None or lowest_leverage is None or highest_leverage is None or base_price_inference_timestamps is None:
+                raise AttributeError(
+                    "If no future_product_instances are provided all other arguments need to be defined for automatic product initialisation from desired leverages.")
+            self._future_product_instances = self.initialise_products_from_leverage(
+                underlying_price_series=underlying_price_series,
+                base_price_inference_timestamps=base_price_inference_timestamps if isinstance(
+                    base_price_inference_timestamps,
+                    list) else [
+                    base_price_inference_timestamps],
+                n_products_per_direction=n_products_per_direction,
+                lowest_leverage=lowest_leverage,
+                highest_leverage=highest_leverage,
+                abs_base_price_change_threshold=abs_base_price_change_threshold)
+        # future product instances accessible through property to leverage setter for resetting _date_leverage_frame and _isin_product_dict
+
+    def plot_leverages(self, plot_size=(15, 10), leverage_lim=(0, 10), show_legend=False):
+        """
+        Plot the leverage development over time for all products in the set.
+
+        Leverage time series are displayed separately for long and short products.
+
+        Parameters
+        ----------
+        plot_size : tuple of int, default (15, 10)
+            The size of the plot in inches (width, height).
+        leverage_lim : tuple of float, default (0, 10)
+            The y-axis limits for the leverage plot.
+
+        Returns
+        -------
+        None
+        """
+        fig, (long_ax, short_ax) = plt.subplots(2, 1, figsize=plot_size)
+
+        # split by direction:
+        long_list = [product for product in self.future_product_instances if product.direction == 'long']
+        short_list = [product for product in self.future_product_instances if product.direction == 'short']
+
+        for ax, product_list in zip([long_ax, short_ax], [long_list, short_list]):
+            # prepare list of colors:
+            cmap = plt.get_cmap('hsv')
+            colors = cmap(np.linspace(0, 1, len(product_list)))
+
+            for product, color in zip(product_list, colors):
+                # plot each leverage:
+                ax.plot(product.date_index, product.leverage_series, color=color,
+                        label=f"{product.isin if product.isin is not None else 'ISIN not provided'}")
+
+            # formatting
+            if show_legend: ax.legend(loc='upper left')
+            ax.set_ylabel('Leverage [x]')
+            ax.set_xlabel('Date')
+            ax.set_ylim(leverage_lim)
+            ax.grid(color='grey')
+        long_ax.set_title('Long Products')
+        short_ax.set_title('Short Products')
+        fig.tight_layout()
+
+    def generate_new_isin(self, direction: Literal["long", "short"] = None) -> str:
+        """ Generate new artificial ISIN while preventing duplicates. """
+        if self._last_isin_counter > 9999: self._last_isin_counter = 0  # reset counter upon max displayable int
+        new_isin = f"ARTIF{('LO' if direction == 'long' else 'SH') if direction is not None else '00'}{str(self._last_isin_counter).zfill(4)}"
+        self._last_isin_counter += 1
+        return new_isin
+
+    def initialise_products_from_leverage(self, underlying_price_series: pd.Series,
+                                          base_price_inference_timestamps: [str],
+                                          n_products_per_direction: int = 5, lowest_leverage: float = 1.0,
+                                          highest_leverage: float = 5.0,
+                                          fix_initial_knockouts=True, abs_base_price_change_threshold: float = .04,
+                                          issue_date: str = None) -> [KOCertificate]:
+        """
+        Generate a list of `KOCertificate` instances based on specified leverage settings.
+
+        This method creates both long and short products with evenly spaced leverage values
+        between `lowest_leverage` and `highest_leverage`. Each product's base price is
+        inferred from its desired leverage at the specified timestamp.
+
+        Parameters
+        ----------
+        underlying_price_series : pd.Series
+            The time series of the underlying asset's price.
+        base_price_inference_timestamps : [str]
+            List of timestamps at which to infer the base price from the desired leverage.
+        n_products_per_direction : int, default 5
+            The number of products to create for each direction (long and short).
+        lowest_leverage : float, default 1.0
+            The lowest leverage value for generated products.
+        highest_leverage : float, default 5.0
+            The highest leverage value for generated products.
+
+        Returns
+        -------
+        list of KOCertificate
+            A list of initialized `KOCertificate` instances with desired leverages.
+        """
+        # direction and leverage lists:
+        desired_directions = ['long'] * n_products_per_direction + ['short'] * n_products_per_direction
+        desired_leverages = list(np.linspace(lowest_leverage, highest_leverage, n_products_per_direction)) * 2
+
+        # initialise product list:
+        product_list = []
+        # iterate over timestamps at which to guarantee leverages, i.e. initialise base prices:
+        for base_price_inference_timestamp in base_price_inference_timestamps:
+            # initialise products
+            temp_product_list = [KOCertificate(underlying_price_series=underlying_price_series,
+                                               isin=self.generate_new_isin(direction=dir),
+                                               scrape_data_if_possible=False, direction=dir, issue_date=issue_date) for
+                                 dir in desired_directions]
+            # infer base price from leverages at base_price:
+            for ind, (product, leverage) in enumerate(tqdm(zip(temp_product_list, desired_leverages))):
+                product.get_base_price_from_leverage(date=base_price_inference_timestamp, leverage=leverage,
+                                                     use_as_1st_base_price_tuple=True)
+
+                # parametrise base price development:
+                if fix_initial_knockouts:
+                    product.fix_initial_knockout()  # resolves initial KOs, does nothing if no initial KO
+                if abs_base_price_change_threshold is not None:  # if (often from resolving initial KOs) the base price change is too steep:
+                    if np.abs(product.base_price_change_per_annum) > abs_base_price_change_threshold:
+                        product.enforce_base_price_increase_per_annum(abs_base_price_change_threshold)  # adjust such
+
+            product_list += temp_product_list  # append to product list
+
+        return product_list
+
+    def get_product_from_leverage_span(self, date: str, direction: Literal['long', 'short'],
+                                       leverage_span: (int, int),
+                                       return_all=False,
+                                       search_ascending=True) -> Union[str, KOCertificate]:
+
+        """ Search for product with the smallest (if search_ascending) leverage inside leverage_span. Raises KeyError if no produt found. """
+        # utilise pre-computed leverage frame across time and products:
+        frame = self.long_leverage_frame if direction == 'long' else self.short_leverage_frame
+        leverages = frame.loc[date, :]  # select specified date
+        candidates = leverages.loc[
+            (leverages >= leverage_span[0]) & (leverages <= leverage_span[1])]  # leverage span condition
+        if len(candidates) == 0: raise KeyError("No product with respective leverage found!")
+
+        # select product with the smallest leverage inside span:
+        if not return_all:
+            isin = candidates.sort_values(ascending=search_ascending).index[0]
+            return isin
+        else:  # if all isins should be returned:
+            isins = list(candidates.sort_values(ascending=search_ascending).index)
+            if not isinstance(isins, list): isins = [isins]
+            return isins
+
+    @staticmethod
+    def _check_leverage_availability_per_row(row: pd.Series, leverage_categories: [float] = None,
+                                             include_open_leverage_category: bool = False,
+                                             # if True, last category is open to inf.
+                                             ) -> pd.Series:
+        """ To be applied via pd.DataFrame.apply(axis='columns') to each row of the leverage_frame. """
+        # construct leverage categories to check:
+        if leverage_categories is None: leverage_categories = [1.0, 2.0, 3.0, 4.0, 5.0]
+        leverage_span_tuples = [(start, np.inf if ind + 1 == len(leverage_categories) else leverage_categories[ind + 1])
+                                for ind, start in enumerate(leverage_categories)]
+
+        # remove last category if required:
+        if not include_open_leverage_category:
+            leverage_span_tuples = leverage_span_tuples[:-1]
+            leverage_categories = leverage_categories[:-1]
+
+        # derive unique leverages:
+        unique_leverages = pd.Series(row.unique())
+
+        # return series with Bool whether leverage is available per category:
+        availabilities = [len(unique_leverages.loc[(upper > unique_leverages) & (unique_leverages > lower)]) != 0 for
+                          lower, upper in leverage_span_tuples]
+        return pd.Series(index=leverage_categories, data=availabilities)
+
+    def get_leverage_availability(self, product_type: Literal["long", "short"],
+                                  hour_minute_to_check: (int, int) = None,
+                                  leverage_categories: [float] = None,
+                                  include_open_leverage_category: bool = False,
+                                  # if True, last category is open to inf.
+                                  verbose=True) -> pd.DataFrame:
+        """ Check leverage product availability along each time step (rows) and leverage_category (columns). """
+        # select leverage_frame based on direction:
+        if product_type == "long":
+            frame = self.long_leverage_frame
+        elif product_type == "short":
+            frame = self.short_leverage_frame
+
+        # select timestamps to be scrutinized:
+        frame = frame.loc[
+            (frame.index.hour == hour_minute_to_check[0]) & (frame.index.minute == hour_minute_to_check[1])]
+
+        # check leverage availabilities:
+        avail_frame = frame.apply(func=self._check_leverage_availability_per_row, axis='columns',
+                                  # function args:
+                                  leverage_categories=leverage_categories,
+                                  include_open_leverage_category=include_open_leverage_category)
+
+        # print statement:
+        if verbose:
+            for column in avail_frame:
+                print(f'Availability of leverage >{column}:',
+                      avail_frame[column].value_counts()[True] / len(avail_frame) * 100, "%")
+
+        return avail_frame
+
+    ######### Properties #######
+    @property
+    def future_product_instances(self) -> [KOCertificate]:
+        """ List of included future products. Changing resets private attributes _date_leverage_frame and _isin_product_dict. """
+        return self._future_product_instances
+
+    @future_product_instances.setter
+    def future_product_instances(self, value: [KOCertificate]):
+        self._future_product_instances = value
+        self._isin_product_dict = None
+        self._long_leverage_frame = self._short_leverage_frame = self._price_frame = None
+
+    @property
+    def by_isin(self) -> {str: KOCertificate}:
+        """ Locate product from set by ISIN. """
+        if self._isin_product_dict is None:
+            self._isin_product_dict = {product.isin: product for product in self.future_product_instances}
+        return self._isin_product_dict
+
+    @property
+    def price_frame(self) -> pd.DataFrame:
+        """ Dataframe with all product's prices by date (rows) and product-isin (columns). """
+        if self._price_frame is None:
+            self._price_frame = pd.DataFrame(
+                {product.isin: product.price_series for product in self.future_product_instances})
+        return self._price_frame
+
+    @property
+    def long_leverage_frame(self) -> pd.DataFrame:
+        """ Dataframe with long products' leverages by date (rows) and product-isin (columns). """
+        if self._long_leverage_frame is None:
+            self._long_leverage_frame = pd.DataFrame(
+                {product.isin: product.leverage_series for product in self.future_product_instances if
+                 product.direction == 'long'})
+            self._long_leverage_frame.fillna(0,
+                                             inplace=True)  # na arises if issue date is later than considered timestamp, 0 is used as identifier that product isn't available (either KO or not yet issued)
+        return self._long_leverage_frame
+
+    @property
+    def short_leverage_frame(self) -> pd.DataFrame:
+        """ Dataframe with short products' leverages by date (rows) and product-isin (columns). """
+        if self._short_leverage_frame is None:
+            self._short_leverage_frame = pd.DataFrame(
+                {product.isin: product.leverage_series for product in self.future_product_instances if
+                 product.direction == 'short'})
+            self._short_leverage_frame.fillna(0,
+                                              inplace=True)  # na arises if issue date is later than considered timestamp, 0 is used as identifier that product isn't available (either KO or not yet issued)
+        return self._short_leverage_frame
+
+    @property
+    def leverage_frame(self) -> pd.DataFrame:
+        """ Dataframe with all products' leverages by date (rows) and product-isin (columns). """
+        return pd.concat([self.long_leverage_frame, self.short_leverage_frame], axis='columns')
