@@ -859,9 +859,12 @@ class LSTMPredictor:
         if self.verbose: print(f"Saving LSTM model to {save_path}/{save_title}.pt")
         torch.save(self.lstm_model, save_path / save_title)
 
-    def run_training(self, custom_n_epochs: int = None):
+    def run_training(self, custom_n_epochs: int = None, custom_early_stopping_patience: int = None,
+                     visualise_validation_predictions_every: int = None):
         """ Train LSTM model. """
         if custom_n_epochs is not None: self._n_train_epochs = custom_n_epochs  # don't set property here but attribute because otherwise run_training is re-triggered
+        if custom_early_stopping_patience is not None: self._early_stopping_patience = custom_early_stopping_patience
+
         # initialise optimiser and scheduler:
         optimiser = optim.Adam(self.lstm_model.parameters(), lr=self.initial_lr, betas=(0.9, 0.98),
                                eps=1e-9)  # beta and eps are standard values derived from github
@@ -878,6 +881,13 @@ class LSTMPredictor:
                             desc=f'Train loss: - | Val Loss: - | Patience {'/' if self.early_stopping_patience == 0 else f'{0}/{self.early_stopping_patience}'} | LRate: - | Progress')
         loss_train_history, loss_val_history = [], []
         for epoch in progress_bar:
+            # eventually visualise training progress:
+            if visualise_validation_predictions_every is not None:
+                if epoch % visualise_validation_predictions_every == 0:
+                    print("Plotting validation split prediction overview.")
+                    self.plot_prediction_overview(custom_plot_title=f"Validation Split Predictions Epoch {epoch}")
+
+            # conduct training step:
             loss_train, lr_train = self.lstm_model.run_epoch(self.dataloader_train, optimiser=optimiser,
                                                              device=self.device, loss_criterion=self.loss_criterion,
                                                              is_training=True)
@@ -937,7 +947,7 @@ class LSTMPredictor:
             ax.set_title('Training Progress')
 
     def plot_prediction_overview(self, data_split: Literal['training', 'validation'] = 'validation',
-                                 day_slice: (int, int) = None,
+                                 day_slice: (int, int) = None, custom_plot_title: str = None,
                                  X_color: str = 'blue', Y_color: str = 'red', pred_color: str = 'green',
                                  plot_size: (int, int) = (12, 6),
                                  ) -> None:
@@ -970,12 +980,13 @@ class LSTMPredictor:
 
         ax.set_xlabel('Date')
         ax.set_ylabel('Price')
-        ax.set_title('Result Overview')
+        ax.set_title('Result Overview' if custom_plot_title is None else custom_plot_title)
         legend_elements = [Line2D([0], [0], color=X_color, label='Training Prices'),
                            Line2D([0], [0], color=Y_color, label='Target Prices', linewidth=3),
                            Line2D([0], [0], color=pred_color, label='Predicted Prices', linestyle='--'),]
         ax.legend(handles=legend_elements)
         ax.grid(True)
+        plt.show()
 
     def predict(self, input_values: Union[pd.Series, np.array],
                 input_dates: np.array = None,
