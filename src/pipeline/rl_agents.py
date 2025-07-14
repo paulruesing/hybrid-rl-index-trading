@@ -1,6 +1,7 @@
 from typing import Literal
 import numpy as np
 
+
 class MultiProductAgent:
     """
     Manual trading agent callable with RLTradingEnv observations.
@@ -9,11 +10,14 @@ class MultiProductAgent:
     decision logic uses potential estimates to determine an action via preset thresholds. Users may override
     the `get_decision` method to implement custom decision strategies.
     """
+
     def __init__(self,
                  observation_types: [Literal['potential', 'tendency', 'cash', 'holding']],
+                 observation_horizons_minute: [int],
                  n_leverage_categories: int,
                  include_open_leverage_category: bool = False,
                  abs_potential_treshold_steps: (float, float, float) = (.0025, .0075, .015),
+                 potential_treshold_horizon_days: int = 90,
                  ):
         """
         Initialize a MultiProductAgent instance.
@@ -23,18 +27,37 @@ class MultiProductAgent:
         observation_types : list of {'potential', 'tendency', 'cash', 'holding'}
             The types of observations the agent expects in a fixed order, e.g.
             ['potential', 'cash', 'holding'].
+        observation_horizons_minute : list of int
+            The forecast horizon in minutes of each observation of type 'potential' or 'tendency'.
+            Enter None for other.
         n_leverage_categories : int
             Number of leverage categories to consider when determining actions.
         include_open_leverage_category : bool, default False
             Whether to include an open-ended leverage category for very high/low potentials.
         abs_potential_treshold_steps : tuple of float, default (.0025, .0075, .015)
+            Thresholds unit is expected return on investment over next potential_treshold_horizon_days days.
             Threshold steps that define zones of potential:
             - Below the first threshold: no action.
             - Between first and second: opposite direction products are sold.
             - Between second and third: products are bought in the estimated direction.
             Thresholds are linearly scaled according to the number of leverage categories.
+            Thresholds unit is expected return on investment over next 30 days.
+        potential_treshold_horizon_days : int, default is 90
+            Days corresponding to defined potential tresholds. Environment observations will be scaled to such.
         """
         self.observation_types = observation_types
+        self.observation_horizons_minute = observation_horizons_minute
+
+        # sanity check:
+        if len(observation_horizons_minute) != len(self.observation_types):
+            raise ValueError(
+                "observation_types array needs to match length of observation_horizons_minute. Provide None entry in the latter for 'cash' or 'holding' observations.")
+        for type, horizon in zip(observation_types, observation_horizons_minute):
+            if type == 'potential' or type == 'tendency':
+                if horizon is None: raise ValueError(
+                    "None observation_horizon_minute entry is only allowed for 'cash' or 'holding' types.")
+
+        self.potential_treshold_horizon_days = potential_treshold_horizon_days
 
         # initialise thresholds
         self.abs_potential_treshold_steps = abs_potential_treshold_steps
@@ -68,7 +91,7 @@ class MultiProductAgent:
             Human-readable explanation of threshold-action mappings.
         """
         intro_str = "------------------- KOCertificate Instance -------------------\n\n"
-        lines = ["Threshold-action mapping:"]
+        lines = [f"{self.potential_treshold_horizon_days}-Day-Return-Threshold -> Action Mapping:"]
         for i, lower in enumerate(self.lower_thresholds):
             upper = self.lower_thresholds[i + 1] if i + 1 < len(self.lower_thresholds) else np.inf
             action = self.actions[i]
@@ -123,7 +146,7 @@ class MultiProductAgent:
         Parameters
         ----------
         potential_estimates : list of float
-            Estimates of market potential per asset. Positive indicates long signal, negative short.
+            Estimates of market potential per asset. Positive indicates long signal, negative short. Unit is expected_return / self.potential_treshold_horizon_days.
         tendency_estimates : list of int, optional
             Optional binary indicators of recent direction; 1 for upward, 0 for downward.
         cash : float, optional
@@ -170,15 +193,18 @@ class MultiProductAgent:
         potential_estimates = np.array([], dtype=np.float64)
         tendency_estimates = np.array([], dtype=np.float64)  # 1 should be up, 0 down
         cash = holding = np.nan
-        for type, obs in zip(self.observation_types, observation):
+        for type, horizon_minutes, obs in zip(self.observation_types, self.observation_horizons_minute, observation):
             if type == 'potential':
+                obs = obs / horizon_minutes * self.potential_treshold_horizon_days * 24 * 60  # scale per minute and then to per self.potential_treshold_horizon_days days
                 potential_estimates = np.append(potential_estimates, [obs])
             elif type == 'tendency':
+                obs = obs / horizon_minutes * self.potential_treshold_horizon_days * 24 * 60  # scale to per minute and then to per self.potential_treshold_horizon_days days
                 tendency_estimates = np.append(tendency_estimates, [obs])
             elif type == 'cash':
                 cash = obs
             elif type == 'holding':
                 holding = obs
 
-        return self.get_decision(potential_estimates, tendency_estimates, cash,
-                                 holding), np.nan  # return NaN at second pos because commonly DQN agents return also next state
+        return self.get_decision(potential_estimates=potential_estimates, tendency_estimates=tendency_estimates,
+                                 cash=cash,
+                                 holding=holding), np.nan  # return NaN at second pos because commonly DQN agents return also next state
