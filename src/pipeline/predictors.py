@@ -353,7 +353,8 @@ class LSTMPredictor:
         self.evaluate_hit_rate_upon_training = evaluate_hit_rate_upon_training
 
         self._price_series = self._normalised_price_series = None
-        self._normaliser = preprocessing.Normaliser()
+        self._normaliser = preprocessing.Normaliser()  # initialise normaliser
+        _ = self.normalised_price_series  # access property once, leads to fitting of normaliser for further use
         self._X = self._Y = self._X_dates = self._Y_dates = None
         self._X_train = self._X_val = self._Y_train = self._Y_val = self._X_dates_train = self._X_dates_val = self._Y_dates_train = self._Y_dates_val = None
         self._dataloader_train = self._dataloader_val = None
