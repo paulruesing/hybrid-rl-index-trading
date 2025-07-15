@@ -895,6 +895,9 @@ class LSTMPredictor:
             loss_val, _ = self.lstm_model.run_epoch(self.dataloader_val, optimiser=optimiser, device=self.device,
                                                     loss_criterion=self.loss_criterion, is_training=False)
 
+            # every training epoch needs to reset recent predictions:
+            self._predictions_val = self._predictions_train = None
+
             # scheduler step:
             if self.lr_scheduler == 'plateau':
                 scheduler.step(loss_val)
