@@ -17,7 +17,7 @@ if __name__ == "__main__":
     # necessary files:
     ROOT = Path().resolve().parent
     DATA = ROOT / "data"
-    INTERPOLATED_PRICES = DATA / "interpolated_prices"
+    INTERPOLATED_PRICES = DATA / "interpolated_prices_dax"
     LOG_FILES = ROOT / "output" / "rl_training_logs"
 
     SAVED_MODELS = DATA / "saved_models"
