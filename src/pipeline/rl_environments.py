@@ -34,7 +34,8 @@ class RLTradingEnv(gym.Env):
                  possible_trade_quantities: Literal['all', 'fixed', 'arbitrary'] = 'all',  # used to define action space
                  starting_cash=1000000,
                  commission_rate=0.001,  # reflects a typical spread, because we can trade commission-free through wikifolio
-                 verbose=True
+                 verbose=True,
+                 potential_horizon_days: int = 90,
                  ):
         """
         A reinforcement learning environment for trading using structured price data and predictive signals.
@@ -73,6 +74,8 @@ class RLTradingEnv(gym.Env):
             Effective commission rate or spread applied on each transaction.
         verbose : bool, default True
             Whether to print detailed step and trade information.
+        potential_horizon_days : int, default is 90
+            Forecast days to scale expected return potential to. Only relevant for info statements.
         """
         super(RLTradingEnv, self).__init__()  # initialise base class
         self.price_series = preprocessing.read_price_csv(csv_path=price_csv_path, date_column=date_column,
@@ -85,6 +88,7 @@ class RLTradingEnv(gym.Env):
         self.starting_cash = starting_cash
         self.commission_rate = commission_rate
         self.verbose = verbose
+        self.potential_horizon_days = potential_horizon_days
 
         # current episode (sequence of steps)
         self.current_episode = 0
@@ -136,7 +140,7 @@ class RLTradingEnv(gym.Env):
         # todo: remove
         self.shares = 0
 
-    def step(self, action):
+    def step(self, action: int, track_portfolio_exposure: bool = True):
         """
         Run one timestep of the environment’s dynamics.
 
@@ -148,6 +152,8 @@ class RLTradingEnv(gym.Env):
         ----------
         action : int
             Action index corresponding to the current action enumeration.
+        track_portfolio_exposure : bool, default True
+            Whether to track portfolio exposure during each step. Run-time costly.
 
         Returns
         -------
@@ -180,31 +186,42 @@ class RLTradingEnv(gym.Env):
         # done = (self.current_step == self.total_steps - 1)  # see if episode is finished
 
         # compute average current exposure:
-        portfolio_exposure = np.sum(self.open_positions['Leverage']
-                                    * self.open_positions['% Portfolio'] / 100  # weight by share of portfolio
-                                    * np.where(self.open_positions['Direction'] == 'long',
-                                               1.0, -1.0)  # multiply with 1.0 or -1.0 depending on direction of product
-                                    )
-        portfolio_exposure = portfolio_exposure.item() if (portfolio_exposure is not np.nan) and (
-                    portfolio_exposure != 0) else 0.0
+        if track_portfolio_exposure:
+            portfolio_exposure = np.sum(self.open_positions['Leverage']
+                                        * self.open_positions['% Portfolio'] / 100  # weight by share of portfolio
+                                        * np.where(self.open_positions['Direction'] == 'long',
+                                                   1.0, -1.0)  # multiply with 1.0 or -1.0 depending on direction of product
+                                        )
+            portfolio_exposure = portfolio_exposure.item() if (portfolio_exposure is not np.nan) and (
+                        portfolio_exposure != 0) else 0.0
+        else: portfolio_exposure = None
 
         # get current observation:
         obs = self.current_observation
-        # todo: if more sophisticated weighting approaches included in agent, evtl also include here:
-        avg_potential = np.nanmean(obs[:len(self.predictor_instances)]).item()
+        # todo: if tendencies included in observations, include such here
+
+        # derive average scaled predicted potential:
+        potential_list = np.array([])
+        for type, horizon_minutes, potential in zip(self.observation_types, self.observation_horizons_minutes, obs):
+            if type != 'potential': continue
+            potential = potential / horizon_minutes * self.potential_horizon_days * 24 * 60  # # scale per minute and then to per self.potential_horizon_days days
+            potential_list = np.append(potential_list, [potential])
+        avg_potential = np.nanmean(potential_list).item()
 
         # construct info dictionary:
         info = {'Step': self.current_step,
                 'Time': self.current_step_timestamp.strftime('%Y-%m-%d %H:%M:%S'),
                 'Reward': round(reward.item(), 2) if (reward is not np.nan) and (reward != 0) else 0,
                 'Action': self.action_enum_dict[action],
-                'Avg. Expected Potential': avg_potential,
-                'Total Exposure': portfolio_exposure,
+                f'Avg. Expected Potential / {self.potential_horizon_days}d': avg_potential,
                 'Cash': round(self.cash, 2).item() if isinstance(round(self.cash, 2), np.float64) else round(self.cash,
                                                                                                              2),
                 'Total': round(self.current_balance, 2).item() if isinstance(round(self.current_balance, 2),
                                                                              np.float64) else round(
                     self.current_balance, 2)}
+
+        if portfolio_exposure is not None:
+            info['Total Exposure'] = portfolio_exposure
 
         # if done: self.reset()  # happens automatically!
         # current observation property constructs observation space
@@ -235,13 +252,17 @@ class RLTradingEnv(gym.Env):
                                                                        direction=direction, leverage_span=leverage_span)
             except KeyError:  # no product found
                 print(f"No product with leverage inside {leverage_span} found. Using next smaller leverage.")
-                isin = self.product_set.get_product_from_leverage_span(date=self.current_step_timestamp,
-                                                                       direction=direction,
-                                                                       leverage_span=(1.0, leverage_span[1]),
-                                                                       # include all smaller leverages
-                                                                       search_ascending=False,
-                                                                       # sort in decreasing order
-                                                                       )
+                try:
+                    isin = self.product_set.get_product_from_leverage_span(date=self.current_step_timestamp,
+                                                                           direction=direction,
+                                                                           leverage_span=(1.0, leverage_span[1]),
+                                                                           # include all smaller leverages
+                                                                           search_ascending=False,
+                                                                           # sort in decreasing order
+                                                                           )
+                except KeyError:  # still no product found, then return
+                    print(f"No product with smaller leverage available. Return")
+                    return
 
             # current price:
             price = self.current_prices_per_product[isin] * (1 + self.commission_rate)
@@ -480,6 +501,23 @@ class RLTradingEnv(gym.Env):
                     list(self.daily_prediction_hours)).item():
                 self._step_dates_list = self.step_dates_list[:-(len(self.daily_prediction_hours))]
         return self._step_dates_list
+
+    ################ Observation Properties ################
+    @property
+    def observation_horizons_minutes(self) -> [int]:
+        """ The forecast horizon in minutes of each observation of type 'potential' or 'tendency'. Is None for other types. """
+        predictor_horizons = [predictor.forecast_horizon * predictor.sampling_rate_minutes for predictor in self.predictor_instances]
+        # tendency_horizons (placeholder!)
+        other = [None, None]  # cash and holding
+        return predictor_horizons + other
+
+    @property
+    def observation_types(self) -> [Literal['potential', 'tendency', 'cash', 'holding']]:
+        """ The types of observations the agent expects in a fixed order, e.g. ['potential', 'cash', 'holding']."""
+        predictor_types = ['potential' for predictor in self.predictor_instances]
+        # tendency_types (placeholder!)
+        other = ['cash', 'holding']
+        return predictor_types + other
 
     @property
     def current_observation(self):
