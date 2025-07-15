@@ -73,8 +73,8 @@ class MultiProductAgent:
         # intialise actions:
         buy_long_actions = list(range(1, 4 * n_leverage_categories + 1, 4))
         sell_long_actions = list(range(2, 4 * n_leverage_categories + 1, 4))
-        buy_short_actions = list(range(3, 4 * n_leverage_categories + 1, 4))
-        sell_short_actions = list(range(4, 4 * n_leverage_categories + 1, 4))
+        buy_short_actions = list(range(3, 4 * n_leverage_categories + 1, 4))[::-1]
+        sell_short_actions = list(range(4, 4 * n_leverage_categories + 1, 4))[::-1]
 
         # join:
         self.lower_thresholds = np.concat(
@@ -92,9 +92,9 @@ class MultiProductAgent:
         """
         intro_str = "------------------- KOCertificate Instance -------------------\n\n"
         lines = [f"{self.potential_treshold_horizon_days}-Day-Return-Threshold -> Action Mapping:"]
-        for i, lower in enumerate(self.lower_thresholds):
-            upper = self.lower_thresholds[i + 1] if i + 1 < len(self.lower_thresholds) else np.inf
-            action = self.actions[i]
+        for threshold_ind, lower in enumerate(self.lower_thresholds):
+            upper = self.lower_thresholds[threshold_ind + 1] if threshold_ind + 1 < len(self.lower_thresholds) else np.inf
+            action = self.actions[threshold_ind]
             lines.append(f"  {lower:>8.5f} < potential < {upper:>8.5f}  -->  action {action}")
         threshold_explanation_str = "\n".join(lines)
         return intro_str + threshold_explanation_str
@@ -161,7 +161,8 @@ class MultiProductAgent:
         """
         # average estimates: (todo: consider weighting here)
         avg_potential = np.mean(potential_estimates)
-        avg_tendency = np.mean(tendency_estimates) if tendency_estimates is not None else 0
+        # weight by tendency:
+        avg_tendency = np.mean(tendency_estimates) if tendency_estimates is not None and len(tendency_estimates) != 0 else 0
 
         # select action based on thresholds:
         for ind, lower in enumerate(self.lower_thresholds):
@@ -198,7 +199,6 @@ class MultiProductAgent:
                 obs = obs / horizon_minutes * self.potential_treshold_horizon_days * 24 * 60  # scale per minute and then to per self.potential_treshold_horizon_days days
                 potential_estimates = np.append(potential_estimates, [obs])
             elif type == 'tendency':
-                obs = obs / horizon_minutes * self.potential_treshold_horizon_days * 24 * 60  # scale to per minute and then to per self.potential_treshold_horizon_days days
                 tendency_estimates = np.append(tendency_estimates, [obs])
             elif type == 'cash':
                 cash = obs
