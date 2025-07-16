@@ -61,13 +61,15 @@ class TransformerModel(nn.Module):
     hidden_layer_size : int, default=32
         Hidden size of transformer embeddings.
     num_layers : int, default=2
-        Number of transformer encoder layers.
+        Number of transformer encoder and decoder layers.
     n_forecast_steps : int, default=1
         Number of steps to forecast (output sequence length).
     dropout : float, default=0.2
         Dropout rate inside transformer layers.
-    n_heads : int, default=4
+    n_heads : int, default=1
         Number of attention heads in transformer.
+        If use_pre_transformer_fc_layer: hidden_layer_size needs to be divisible by n_heads,
+        if not: input_size needs to be divisible by n_heads.
     use_pre_transformer_fc_layer : bool, default=False
         Whether to apply a linear + ReLU layer before transformer.
     max_seq_len : int, default=100
@@ -75,14 +77,13 @@ class TransformerModel(nn.Module):
     init_weights : bool, default=True
         Whether to initialize weights manually.
     """
-
     def __init__(self,
                  input_size: int = 1,
-                 hidden_layer_size: int = 32,
-                 num_layers: int = 2,
+                 hidden_layer_size: int = 2048,
+                 num_layers: int = 6,
                  n_forecast_steps: int = 1,
                  dropout: float = 0.2,
-                 n_heads: int = 4,
+                 n_heads: int = 1,
                  use_pre_transformer_fc_layer: bool = False,
                  max_seq_len: int = 100,
                  init_weights: bool = True):
@@ -93,25 +94,41 @@ class TransformerModel(nn.Module):
         self.n_heads = n_heads
         self.max_seq_len = max_seq_len
 
-        self.linear_1 = nn.Linear(input_size, hidden_layer_size) if use_pre_transformer_fc_layer else None
+        # linear pre-transformer layer
+        self.linear_1 = nn.Linear(in_features=input_size, out_features=hidden_layer_size) if use_pre_transformer_fc_layer else None
         self.relu = nn.ReLU() if use_pre_transformer_fc_layer else None
 
-        # transformer input features:
-        d_model = hidden_layer_size if use_pre_transformer_fc_layer else input_size
+        # transformer input features (embedding dimension)
+        self.d_model = hidden_layer_size if use_pre_transformer_fc_layer else input_size
+        assert self.d_model % n_heads == 0; "Embedding dimension needs to be divisible by n_heads."
 
         # Learnable positional encoding parameter:
-        self.positional_encoding = nn.Parameter(torch.zeros(1, max_seq_len, d_model))
+        self.encoder_positional_encoding = nn.Parameter(torch.zeros(1,  # shape 1 allows broadcasting to all batches
+                                                            max_seq_len, self.d_model))
+        self.decoder_positional_encoding = nn.Parameter(torch.zeros(1, n_forecast_steps, self.d_model))
 
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model,
+        # specify encoder layers:
+        encoder_layer = nn.TransformerEncoderLayer(d_model=self.d_model,
                                                    nhead=self.n_heads,
-                                                   dim_feedforward=hidden_layer_size * 2,
+                                                   dim_feedforward=hidden_layer_size,
                                                    dropout=dropout,
-                                                   batch_first=True)
+                                                   batch_first=True,  # then input is (batch_size, sequence_length, d_model)
+                                                   )
+        # stack encoder layers:
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-        self.attention_pool = nn.Linear(d_model, 1)
+        # specify decoder layers:
+        decoder_layer = nn.TransformerDecoderLayer(d_model=self.d_model,
+                                                   nhead=self.n_heads,
+                                                   dim_feedforward=hidden_layer_size,
+                                                   dropout=dropout,
+                                                   batch_first=True,  # then input is (batch_size, sequence_length, d_model)
+                                                   )
+        self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
 
-        self.linear_2 = nn.Linear(d_model, n_forecast_steps)
+        # final output projection to one feature per forecast step:
+        # linear layer is applied to last dimension of input tensor (that is: d_model)
+        self.output_projection = nn.Linear(in_features=self.d_model, out_features=1)
 
         if init_weights:
             self.init_weights()
@@ -120,62 +137,105 @@ class TransformerModel(nn.Module):
         """
         Initialize model weights and biases.
 
-        Weights are initialized with Xavier uniform distribution.
-        Biases are initialized to zero.
-        Positional encoding is initialized with a small normal distribution.
-
-        Returns
-        -------
-        None
+        - Linear and Conv1d layers: Xavier uniform for weights, zero for biases.
+        - LayerNorm: Ones for weights, zeros for biases.
+        - Positional encodings: Normal distribution with mean=0, std=0.01.
         """
-        for name, param in self.named_parameters():
-            if 'bias' in name:
-                nn.init.constant_(param, 0.0)
-            elif 'weight' in name:
-                nn.init.xavier_uniform_(param)
-        # Initialize positional encoding with small values
-        nn.init.normal_(self.positional_encoding, mean=0, std=0.01)
+        def _init_fn(module):
+            if isinstance(module, (nn.Linear, nn.Conv1d)):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0.0)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.constant_(module.weight, 1.0)
+                nn.init.constant_(module.bias, 0.0)
+            elif isinstance(module, nn.Embedding):
+                nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                if module.padding_idx is not None:
+                    nn.init.constant_(module.weight[module.padding_idx], 0.0)
 
-    def forward(self, x):
+        self.apply(_init_fn)
+
+        # Positional encodings initialized separately
+        nn.init.normal_(self.encoder_positional_encoding, mean=0.0, std=0.01)
+        nn.init.normal_(self.decoder_positional_encoding, mean=0.0, std=0.01)
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor = None, teacher_forcing_ratio: float = 0.5) -> torch.Tensor:
         """
         Forward pass of the model.
 
         Parameters
         ----------
         x : torch.Tensor
-            Input tensor of shape (batch_size, seq_len, input_size).
+            Input tensor of shape (batch_size, seq_len, d_model).
+        y : torch.Tensor, optional
+            Target tensor of shape (batch_size, seq_len, d_model). Necessary for teacher forcing.
+        teacher_forcing_ratio : float, default 0.5
+            probability for feeding ground truth as decoder input instead of previous prediction.
+            accelerates convergence and stablises training.
 
         Returns
         -------
         torch.Tensor
             Predictions of shape (batch_size, n_forecast_steps).
         """
-        if self.use_pre_transformer_fc_layer:
-            temp_x = self.linear_1(x)
-            temp_x = self.relu(temp_x)
-        else:
-            temp_x = x
+        batch_size = x.size(0)
 
-        seq_len = temp_x.size(1)
+        # apply pre transformer fully connected layer:
+        if self.use_pre_transformer_fc_layer:
+            x = self.relu(self.linear_1(x))
+
+        ###### Encoder Part ######
+        # x dimension is (batch_size, sequence_length, d_model)
+        # with d_model either
+        #   = 1 if not use_pre_transformer_fc_layer or
+        #   = hidden_layer_size if use_pre_transformer_fc_layer
+        seq_len = x.size(1)
         if seq_len > self.max_seq_len:
             raise ValueError(f"Input sequence length {seq_len} exceeds max_seq_len {self.max_seq_len}")
 
-        # Add positional encoding (slice to sequence length)
-        temp_x = temp_x + self.positional_encoding[:, :seq_len, :]
+        # add positional encoding (slice to sequence length)
+        x = x + self.encoder_positional_encoding[:, :seq_len, :]
 
-        transformer_out = self.transformer_encoder(temp_x)
+        # transformer input still has dimensions (batch_size, sequence_length, d_model)
+        encoder_output = self.transformer_encoder(x)
+        # output dimension is identical
 
-        attn_scores = self.attention_pool(transformer_out).squeeze(-1)
-        attn_weights = torch.softmax(attn_scores, dim=1).unsqueeze(-1)
-        pooled_output = (transformer_out * attn_weights).sum(dim=1)
+        ###### Decoder Part ######
+        # decoder input starts with 0's then gets auto-regressively extended along dimension 1
+        # during the process the decoder leverages the encoder_output as context (memory)
+        decoder_input = torch.zeros(batch_size,
+                                    1,  # this dimension grows during the loop below
+                                    self.d_model).to(x.device)
+        outputs = torch.empty(size=(batch_size, self.n_forecast_steps), device=x.device,
+                              dtype=x.dtype)  # initialise empty tensor for outputs
 
-        predictions = self.linear_2(pooled_output)
+        for output_sequence_ind in range(self.n_forecast_steps):
+            # target is the output sequence, which is build step-by-step
+            tgt = decoder_input + self.decoder_positional_encoding[:, :decoder_input.size(1), :]  # incorporate positional encoding
+            out = self.transformer_decoder(tgt, memory=encoder_output)  # leverage encoder_output
 
-        # TODO: consider more sophisticated decoding schemes
+            # derive prediction:
+            next_step = self.output_projection(out[:, -1:, :])  # predict next value based on last output_projection of output time-step
+            next_step = next_step.squeeze(-1)  # remove trailing singleton dimension -> size: (batch_size, 1)
+            outputs[:, output_sequence_ind] = next_step.squeeze(-1)  # save to outputs
 
-        return predictions.squeeze(-1)
+            # Update decoder_input:
+            #   if y is provided and with teacher_forcing_ratio probability: use actual ground_truth
+            if y is not None and torch.rand(1).item() < teacher_forcing_ratio:
+                ground_truth = y[:, output_sequence_ind:output_sequence_ind + 1]
+                # if use_pre_transformer_fc_layer, the decoder expects d_model dimensionality, hence upscale next_input with linear layer:
+                next_input = self.linear_1(ground_truth.unsqueeze(-1)) if self.use_pre_transformer_fc_layer else ground_truth.unsqueeze(-1)
+            #   else: use last prediction
+            else:
+                # analogously:
+                next_input = self.linear_1(next_step.unsqueeze(-1)) if self.use_pre_transformer_fc_layer else next_step.unsqueeze(-1)
+            decoder_input = torch.cat([decoder_input, next_input], dim=1)  # concatenate along dimension 1
 
-    def run_epoch(self, dataloader, optimiser, device='cpu', loss_criterion=nn.MSELoss(), is_training=False):
+        return outputs.squeeze(-1)  # (batch_size, n_forecast_steps)
+
+    def run_epoch(self, dataloader, optimiser, device='cpu', loss_criterion=nn.MSELoss(),
+                  is_training=False, teacher_forcing_ratio: float = 0.5):
         """
         Run one epoch of training or validation.
 
@@ -191,6 +251,9 @@ class TransformerModel(nn.Module):
             Loss function to compute training/validation loss.
         is_training : bool, default False
             Whether to perform training (True) or evaluation (False).
+        teacher_forcing_ratio : float, default 0.5
+            probability for feeding ground truth as decoder input instead of previous prediction.
+            accelerates convergence and stablises training.
 
         Returns
         -------
@@ -203,13 +266,12 @@ class TransformerModel(nn.Module):
         self.train() if is_training else self.eval()
 
         for idx, (x, y) in enumerate(dataloader):
-            if is_training:
-                optimiser.zero_grad()
+            if is_training: optimiser.zero_grad()
 
             x = x.to(device)
             y = y.to(device)
 
-            out = self(x)
+            out = self(x, y, teacher_forcing_ratio if is_training else 0)
             loss = loss_criterion(out.contiguous(), y.contiguous())
 
             if is_training:
@@ -446,11 +508,7 @@ class LSTMModel(nn.Module):
             - lr (float): Current learning rate of the optimizer.
         """
         epoch_loss = 0
-
-        if is_training:
-            self.train()  # training mode activates Dropout and BatchNorm (updates running statistics with each batch)
-        else:
-            self.eval()  # evaluation mode for inference or testing
+        self.train() if is_training else self.eval()
 
         # iterate through dataset's batches via provided dataloader instance:
         for idx, (x, y) in enumerate(dataloader):
@@ -980,7 +1038,7 @@ class NNPredictor:
         raise NotImplementedError("This method needs to be overwritten in subclasses with specific model mechanics.")
 
     def run_training(self, custom_n_epochs: int = None, custom_early_stopping_patience: int = None,
-                     visualise_validation_predictions_every: int = None):
+                     visualise_validation_predictions_every: int = None, **run_epoch_kwargs):
         """ Train transformer model. """
         if custom_n_epochs is not None: self._n_train_epochs = custom_n_epochs  # don't set property here but attribute because otherwise run_training is re-triggered
         if custom_early_stopping_patience is not None: self._early_stopping_patience = custom_early_stopping_patience
@@ -1010,9 +1068,9 @@ class NNPredictor:
             # conduct training step:
             loss_train, lr_train = self.nn_model.run_epoch(self.dataloader_train, optimiser=optimiser,
                                                              device=self.device, loss_criterion=self.loss_criterion,
-                                                             is_training=True)
+                                                             is_training=True, **run_epoch_kwargs)
             loss_val, _ = self.nn_model.run_epoch(self.dataloader_val, optimiser=optimiser, device=self.device,
-                                                    loss_criterion=self.loss_criterion, is_training=False)
+                                                    loss_criterion=self.loss_criterion, is_training=False, **run_epoch_kwargs)
 
             # every training epoch needs to reset recent predictions:
             self._predictions_val = self._predictions_train = None
@@ -1364,9 +1422,9 @@ class TransformerPredictor(NNPredictor):
 
                  # transformer-specific parameters:
                  model_load_file_path: str = None,
-                 hidden_transformer_layer_size: int = 64,
-                 n_transformer_layers: int = 3,
-                 n_transformer_heads: int = 4,
+                 hidden_transformer_layer_size: int = 2048,
+                 n_transformer_layers: int = 6,
+                 n_transformer_heads: int = 8,
                  dropout: float = 0.3,
                  use_pre_transformer_fc_layer: bool = True,
                  init_weights: bool = True,
