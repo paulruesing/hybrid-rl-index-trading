@@ -272,10 +272,9 @@ def create_train_validation_split(X: np.ndarray, Y: np.ndarray,
     # split train and validation values:
     X_train = X[:validation_split_index]; X_val = X[validation_split_index:]
     Y_train = Y[:validation_split_index]; Y_val = Y[validation_split_index:]
-    if verbose: print(
-        f"Using last {100 * validation_split}% of data for validation. Other data for training.")
-    if verbose: print(
-        f"This yields {len(X_train)} training and {len(X_val)} validation observations.")
+    if verbose:
+        print(f"Using last {100 * validation_split}% of data for validation. Other data for training.")
+        print(f"This yields {len(X_train)} training and {len(X_val)} validation observations.")
 
     # split respective dates:
     X_dates_train = X_dates[:validation_split_index]; X_dates_val = X_dates[validation_split_index:]
