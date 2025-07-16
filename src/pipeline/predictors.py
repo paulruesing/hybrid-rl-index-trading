@@ -300,6 +300,7 @@ class LSTMPredictor:
                  rolling_window_size: int = 32,
                  forecast_horizon: int = 12,
                  validation_split: float = 0.2,
+                 randomise_validation: bool = True,
                  batch_size: int = 32,
                  model_load_file_path: str = None,  # model parameters
                  hidden_lstm_layer_size: int = 64,
@@ -310,7 +311,7 @@ class LSTMPredictor:
                  init_weights: bool = True,
                  use_mps_if_available: bool = False,
                  model_save_directory: str = None,
-                 forecast_step_loss_weight_range: (float) = (1, 0.7),  # training parameters
+                 forecast_step_loss_weight_range: [float, float] = (1, 0.7),  # training parameters
                  n_train_epochs: int = None,  # if set to some number, trains upon initialisation
                  lr_scheduler: Literal['step', 'plateau'] = 'plateau',
                  initial_lr: float = 0.001,
@@ -330,6 +331,7 @@ class LSTMPredictor:
         self._rolling_window_size = rolling_window_size
         self._forecast_horizon = forecast_horizon
         self._validation_split = validation_split
+        self.randomise_validation = randomise_validation
         self._batch_size = batch_size
 
         self._hidden_lstm_layer_size = hidden_lstm_layer_size
@@ -391,7 +393,7 @@ class LSTMPredictor:
 
     def describe(self):
         intro_str = "------------------- LSTMPredictor Instance -------------------\n\n"
-        data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /14} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
+        data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /14} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- randomise validation: {self.randomise_validation}\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
         model_str = f"Model Attributes:\n- hidden LSTM layers: {self._hidden_lstm_layer_size}\n- number of LSTM layers: {self._n_lstm_layers}\n- pre LSTM fully connected layer: {self.use_pre_lstm_fc_layer}\n\n"
         if self.n_train_epochs is not None:
             training_str = f"Training Attributes:\n- final training loss: {self.loss_train}\n- final validation loss: {self.loss_val}\n- final training hit-rate: {self.hit_rate_train}\n- final validation hit-rate: {self.hit_rate_val}"
@@ -564,23 +566,13 @@ class LSTMPredictor:
     def batch_size(self):
         return self._batch_size
 
-    @batch_size.setter
-    def batch_size(self, value):
-        """ Changing value re-initialises dataloaders. """
-        self._batch_size = value
-        self._dataloader_train = self._dataloader_val = None
-
     @property
     def dataloader_train(self):
-        if self._dataloader_train is None: self._dataloader_train = DataLoader(self.dataset_train,
-                                                                               batch_size=self.batch_size, shuffle=True)
-        return self._dataloader_train
+        return DataLoader(self.dataset_train, batch_size=self.batch_size, shuffle=True)
 
     @property
     def dataloader_val(self):
-        if self._dataloader_val is None: self._dataloader_val = DataLoader(self.dataset_val, batch_size=self.batch_size,
-                                                                           shuffle=True)
-        return self._dataloader_val
+        return DataLoader(self.dataset_val, batch_size=self.batch_size, shuffle=True)
 
     # model parameters:
     @property
@@ -592,6 +584,7 @@ class LSTMPredictor:
         """ Changing value re-initialises LSTM model. """
         self._hidden_lstm_layer_size = value
         self._lstm_model = None
+        self._predictions_val = self._predictions_train = None
 
     @property
     def n_lstm_layers(self):
@@ -602,6 +595,7 @@ class LSTMPredictor:
         """ Changing value re-initialises LSTM model. """
         self._n_lstm_layers = value
         self._lstm_model = None
+        self._predictions_val = self._predictions_train = None
 
     @property
     def dropout(self):
@@ -612,6 +606,7 @@ class LSTMPredictor:
         """ Changing value re-initialises LSTM model. """
         self._dropout = value
         self._lstm_model = None
+        self._predictions_val = self._predictions_train = None
 
     @property
     def use_final_hidden_state(self):
@@ -622,6 +617,7 @@ class LSTMPredictor:
         """ Changing value re-initialises LSTM model. """
         self._use_final_hidden_state = value
         self._lstm_model = None
+        self._predictions_val = self._predictions_train = None
 
     @property
     def use_pre_lstm_fc_layer(self):
@@ -632,6 +628,7 @@ class LSTMPredictor:
         """ Changing value re-initialises LSTM model. """
         self._use_pre_lstm_fc_layer = value
         self._lstm_model = None
+        self._predictions_val = self._predictions_train = None
 
     @property
     def init_weights(self):
@@ -642,6 +639,7 @@ class LSTMPredictor:
         """ Changing value re-initialises LSTM model. """
         self._init_weights = value
         self._lstm_model = None
+        self._predictions_val = self._predictions_train = None
 
     @property
     def lstm_model(self):
@@ -673,6 +671,7 @@ class LSTMPredictor:
         self._hidden_lstm_layer_size = value.lstm.hidden_size
         self._n_lstm_layers = value.lstm.num_layers
         self._dropout = value.lstm.dropout
+        self._predictions_val = self._predictions_train = None
 
     @property
     def use_mps_if_available(self):
@@ -795,6 +794,7 @@ class LSTMPredictor:
         self._price_series = preprocessing.read_price_csv(csv_path=self._price_csv_path,
                                                           date_column=self._date_column,
                                                           price_column=self._price_column)
+        self._predictions_val = self._predictions_train = None
 
     def prepare_data(self):
         """
@@ -816,6 +816,7 @@ class LSTMPredictor:
                                                       daily_prediction_hour=self.daily_prediction_hour,
                                                       predict_before_daily_prediction_hour=self.predict_before_daily_prediction_hour,
                                                       verbose=self.verbose)
+        self._predictions_train = self._predictions_val = None  # and reset predictions
 
     def split_data(self):
         """
@@ -830,7 +831,9 @@ class LSTMPredictor:
                                                          X_dates=self.X_dates,
                                                          Y_dates=self.Y_dates,
                                                          verbose=self.verbose,
-                                                         validation_split=self.validation_split)
+                                                         validation_split=self.validation_split,
+                                                         randomise=self.randomise_validation)
+        self._predictions_train = self._predictions_val = None  # and reset predictions
 
     def plot_train_validation_overview(self):
         """ Plot training and validation data highlighted by colors. """
@@ -903,6 +906,10 @@ class LSTMPredictor:
                 scheduler.step(loss_val)
             else:
                 scheduler.step()
+
+            # eventually randomise validation and training data:
+            if self.randomise_validation:
+                self.split_data()
 
             loss_train_history.append(loss_train);
             loss_val_history.append(loss_val)

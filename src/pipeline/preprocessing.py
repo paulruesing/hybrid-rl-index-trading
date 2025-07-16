@@ -251,27 +251,35 @@ def create_rolling_window_view(input_series: pd.Series,
 def create_train_validation_split(X: np.ndarray, Y: np.ndarray,
                                   X_dates: np.ndarray, Y_dates: np.ndarray,
                                   validation_split: float = 0.2,
+                                  randomise: bool = True,
                                   verbose: bool = False):
     """
     Splits training and target values into training and validation split.
 
     Returns tuple with X_train, X_val, Y_train, Y_val, X_dates_train, X_dates_val, Y_dates_train, Y_dates_val.
     """
+    if randomise:
+        # shuffle row indices:
+        idx = np.random.permutation(X.shape[0])
+
+        # apply to all matrices so that rows that belong together, still have the same index:
+        X = X[idx]; X_dates = X_dates[idx]; Y = Y[idx]; Y_dates = Y_dates[idx]
+        # afterwards the same procedure as without randomisation can be kept
+
+    # derive index separating last rows of data:
     validation_split_index = int(X.shape[0] * (1 - validation_split))
-    X_train = X[:validation_split_index]
-    X_val = X[validation_split_index:]
-    Y_train = Y[:validation_split_index]
-    Y_val = Y[validation_split_index:]
+
+    # split train and validation values:
+    X_train = X[:validation_split_index]; X_val = X[validation_split_index:]
+    Y_train = Y[:validation_split_index]; Y_val = Y[validation_split_index:]
     if verbose: print(
         f"Using last {100 * validation_split}% of data for validation. Other data for training.")
     if verbose: print(
         f"This yields {len(X_train)} training and {len(X_val)} validation observations.")
 
     # split respective dates:
-    X_dates_train = X_dates[:validation_split_index]
-    X_dates_val = X_dates[validation_split_index:]
-    Y_dates_train = Y_dates[:validation_split_index]
-    Y_dates_val = Y_dates[validation_split_index:]
+    X_dates_train = X_dates[:validation_split_index]; X_dates_val = X_dates[validation_split_index:]
+    Y_dates_train = Y_dates[:validation_split_index]; Y_dates_val = Y_dates[validation_split_index:]
 
     return X_train, X_val, Y_train, Y_val, X_dates_train, X_dates_val, Y_dates_train, Y_dates_val
 
