@@ -97,7 +97,7 @@ class TransformerModel(nn.Module):
 
         # linear pre-transformer layer
         #   for input_size=1 this is indeed necessary, because otherwise it would lead to a embedding dimension of 1,
-        #   which would break the core mechanism of how transformers learn and represent information
+        #   which would break the core mechanism of how transformer learn and represent information
         #   all the power of multi-head attention (based on single heads for part of the embedding and scalar multiplication)
         #   would be lost, layer_norm and linear layers become ineffective, gradients could fastly explode or vanish.
         self.linear_1 = nn.Linear(in_features=input_size, out_features=hidden_layer_size)
@@ -628,6 +628,7 @@ class LSTMModel(nn.Module):
             return predictions
 
 
+######################### Predictor classes #########################
 class NNPredictor:
     def __init__(self,
                  sampling_rate_minutes: int = 15,  # data import parameters
@@ -1463,7 +1464,7 @@ class LSTMPredictor(NNPredictor):
         save_title = filemgmt.file_title(
             f"LSTM Model RW{self.rolling_window_size} FH{self.forecast_horizon} Layers{self.n_lstm_layers} Size{self.hidden_lstm_layer_size}{f' {custom_title_identifier}' if custom_title_identifier is not None else ''}",
             dtype_suffix=".pt")
-        if self.verbose: print(f"Saving LSTM model to {save_path}/{save_title}.pt")
+        if self.verbose: print(f"Saving LSTM model to {save_path}/{save_title}")
         torch.save(self.lstm_model, save_path / save_title)
 
 
@@ -1495,7 +1496,7 @@ class TransformerPredictor(NNPredictor):
                  use_start_token: bool = True,
 
                  # training parameters:
-                model_save_directory: str = None,
+                 model_save_directory: str = None,
                  n_train_epochs: int = None,  # if set to some number, trains upon initialisation
                  lr_scheduler: Literal['step', 'plateau'] = 'plateau',
                  initial_lr: float = 0.001,
@@ -1652,7 +1653,6 @@ class TransformerPredictor(NNPredictor):
                     print("Skipping compilation. This will not influence model operation.")
         return self._transformer_model
 
-    # todo: check property names!
     @transformer_model.setter
     def transformer_model(self, value: TransformerModel):
         self._transformer_model = value
@@ -1661,10 +1661,9 @@ class TransformerPredictor(NNPredictor):
             b = value.start_token  # try accessing start token
             self._use_start_token = True if (b is not None) else False
         except AttributeError: self._use_start_token = False
-        self._n_transformer_heads = value.transformer_encoder.encoder_layer.nhead
-        self._hidden_transformer_layer_size = value.transformer_encoder.encoder_layer.dim_feedforward
+        self._n_transformer_heads = value.n_heads
+        self._hidden_transformer_layer_size = value.hidden_layer_size
         self._n_transformer_layers = value.transformer_encoder.num_layers
-        self._dropout = value.transformer_encoder.encoder_layer.dropout
 
         # reset predictions:
         self._predictions_val = self._predictions_train = None
@@ -1687,5 +1686,63 @@ class TransformerPredictor(NNPredictor):
         save_title = filemgmt.file_title(
             f"Transformer Model RW{self.rolling_window_size} FH{self.forecast_horizon} Layers{self.n_transformer_layers} Size{self.hidden_transformer_layer_size} Heads{self.n_transformer_heads}{f' {custom_title_identifier}' if custom_title_identifier is not None else ''}",
             dtype_suffix=".pt")
-        if self.verbose: print(f"Saving Transformer model to {save_path}/{save_title}.pt")
+        if self.verbose: print(f"Saving Transformer model to {save_path}/{save_title}")
         torch.save(self.transformer_model, save_path / save_title)
+
+
+######################### Predictor parametrisation auxiliary fucntions #########################
+def predictor_parametrisation_loop(predictor_class: NNPredictor,
+                                   evaluate_hit_rate=False,
+                                   n_train_epochs: int = 50,
+                                   early_stopping_patience: int = 15,
+                                   sort_metric: Literal['Train Loss', 'Val Loss', 'Train HR', 'Val HR'] = None,
+                                   **param_grid_and_constants):
+    """
+    Hyperparameter search loop for a NNPredictor-type class. Provide class, not an instance!
+
+    Automatically infers parameter grid from provided keyword arguments.
+
+    Provide lists of values for parameters to vary, and single values for constants.
+    """
+    # Identify grid parameters (iterables) and constant parameters
+    grid_params = {k: v for k, v in param_grid_and_constants.items() if isinstance(v, list)}
+    constant_params = {k: v for k, v in param_grid_and_constants.items() if k not in grid_params}
+
+    if sort_metric is not None and ('HR' in sort_metric) and not evaluate_hit_rate:
+        print(
+            f"Specified sort metric {sort_metric} requires hit-rate evaluation. Overriding evaluate_hit_rate=True!")
+        evaluate_hit_rate = True
+
+    # result frame with columns for all varying parameters and resulting metrics:
+    columns = list(grid_params.keys()) + ['Train Loss', 'Val Loss']
+    if evaluate_hit_rate:
+        columns += ['Train HR', 'Val HR']
+    result_array = []  # initialise result array
+
+    # all possible ordered pairs of grid parameters:
+    for config in product(*grid_params.values()):
+        params = dict(zip(grid_params.keys(), config))
+        model_kwargs = {
+            **params,
+            **constant_params,
+            'verbose': False,
+            'n_train_epochs': n_train_epochs,
+            'early_stopping_patience': early_stopping_patience,
+            'evaluate_hit_rate_upon_training': evaluate_hit_rate
+        }
+
+        temp_model = predictor_class(**model_kwargs)
+
+        # settings and losses:
+        result_row = list(config) + [temp_model.loss_train, temp_model.loss_val]
+        if evaluate_hit_rate:
+            result_row += [temp_model.hit_rate_train, temp_model.hit_rate_val]
+        result_array.append(result_row)  # append to result_array
+
+    # convert to frame and sort eventually:
+    results = pd.DataFrame(result_array, columns=columns)
+    if sort_metric is not None:
+        minimize = sort_metric in ['Train Loss', 'Val Loss']
+        results = results.sort_values(by=sort_metric, ascending=minimize)
+
+    return results
