@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
 from typing import Literal, Union, Tuple
+
+from sympy import print_python
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
@@ -58,7 +60,7 @@ class TransformerModel(nn.Module):
     ----------
     input_size : int, default=1
         Number of features per input time step.
-    hidden_layer_size : int, default=32
+    hidden_layer_size : int, default=256
         Hidden size of transformer embeddings.
     num_layers : int, default=2
         Number of transformer encoder and decoder layers.
@@ -66,41 +68,47 @@ class TransformerModel(nn.Module):
         Number of steps to forecast (output sequence length).
     dropout : float, default=0.2
         Dropout rate inside transformer layers.
-    n_heads : int, default=1
+    n_heads : int, default=8
         Number of attention heads in transformer.
-        If use_pre_transformer_fc_layer: hidden_layer_size needs to be divisible by n_heads,
-        if not: input_size needs to be divisible by n_heads.
-    use_pre_transformer_fc_layer : bool, default=False
-        Whether to apply a linear + ReLU layer before transformer.
+        hidden_layer_size needs to be divisible by n_heads!
     max_seq_len : int, default=100
         Maximum sequence length expected (for positional encoding).
     init_weights : bool, default=True
         Whether to initialize weights manually.
+    use_start_token : bool, default=True
+        Whether to utilise a learnable BOS token. If False, uses last time-step of encoder output.
     """
     def __init__(self,
                  input_size: int = 1,
-                 hidden_layer_size: int = 2048,
+                 hidden_layer_size: int = 256,
                  num_layers: int = 6,
                  n_forecast_steps: int = 1,
                  dropout: float = 0.2,
-                 n_heads: int = 1,
-                 use_pre_transformer_fc_layer: bool = False,
+                 n_heads: int = 8,
                  max_seq_len: int = 100,
-                 init_weights: bool = True):
+                 init_weights: bool = True,
+                 use_start_token: bool = True,
+                 ):
         super().__init__()
         self.hidden_layer_size = hidden_layer_size
-        self.use_pre_transformer_fc_layer = use_pre_transformer_fc_layer
         self.n_forecast_steps = n_forecast_steps
         self.n_heads = n_heads
         self.max_seq_len = max_seq_len
 
         # linear pre-transformer layer
-        self.linear_1 = nn.Linear(in_features=input_size, out_features=hidden_layer_size) if use_pre_transformer_fc_layer else None
-        self.relu = nn.ReLU() if use_pre_transformer_fc_layer else None
+        #   for input_size=1 this is indeed necessary, because otherwise it would lead to a embedding dimension of 1,
+        #   which would break the core mechanism of how transformers learn and represent information
+        #   all the power of multi-head attention (based on single heads for part of the embedding and scalar multiplication)
+        #   would be lost, layer_norm and linear layers become ineffective, gradients could fastly explode or vanish.
+        self.linear_1 = nn.Linear(in_features=input_size, out_features=hidden_layer_size)
+        self.relu = nn.ReLU()
 
         # transformer input features (embedding dimension)
-        self.d_model = hidden_layer_size if use_pre_transformer_fc_layer else input_size
-        assert self.d_model % n_heads == 0; "Embedding dimension needs to be divisible by n_heads."
+        self.d_model = hidden_layer_size
+        if self.d_model % n_heads != 0:
+            print("Embedding dimension needs to be divisible by n_heads.")
+            print(f"Choosing n_heads as emb_dim.")
+            self.n_heads = self.d_model
 
         # Learnable positional encoding parameter:
         self.encoder_positional_encoding = nn.Parameter(torch.zeros(1,  # shape 1 allows broadcasting to all batches
@@ -119,6 +127,10 @@ class TransformerModel(nn.Module):
                                                          enable_nested_tensor=(n_heads % 2 == 0),  # only allowed if n_heads is even
                                                          )
 
+        self.use_start_token = use_start_token
+        if self.use_start_token:  # eventually initialise start token:
+            self.start_token = nn.Parameter(torch.zeros(1, 1, self.d_model))
+
         # specify decoder layers:
         decoder_layer = nn.TransformerDecoderLayer(d_model=self.d_model,
                                                    nhead=self.n_heads,
@@ -127,7 +139,7 @@ class TransformerModel(nn.Module):
                                                    batch_first=True,  # then input is (batch_size, sequence_length, d_model)
                                                    )
         self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers,
-                                                         enable_nested_tensor=(n_heads % 2 == 0),  # only allowed if n_heads is even
+                                                         # enable_nested_tensor=(n_heads % 2 == 0),  # only allowed if n_heads is even
                                                          )
 
         # final output projection to one feature per forecast step:
@@ -137,7 +149,7 @@ class TransformerModel(nn.Module):
         if init_weights:
             self.init_weights()
 
-    def init_weights(self):
+    def init_weights(self, std_dev: float = .05):
         """
         Initialize model weights and biases.
 
@@ -161,8 +173,13 @@ class TransformerModel(nn.Module):
         self.apply(_init_fn)
 
         # Positional encodings initialized separately
-        nn.init.normal_(self.encoder_positional_encoding, mean=0.0, std=0.01)
-        nn.init.normal_(self.decoder_positional_encoding, mean=0.0, std=0.01)
+        nn.init.normal_(self.encoder_positional_encoding, mean=0.0, std=std_dev)
+        nn.init.normal_(self.decoder_positional_encoding, mean=0.0, std=std_dev)
+
+        if self.use_start_token:  # eventually initialise decoder start token
+            nn.init.normal_(self.start_token, mean=0.0, std=std_dev)  # optional initialization
+
+        self.print_weights(only_check_extrema=True)
 
     def forward(self, x: torch.Tensor, y: torch.Tensor = None, teacher_forcing_ratio: float = 0.5) -> torch.Tensor:
         """
@@ -186,14 +203,11 @@ class TransformerModel(nn.Module):
         batch_size = x.size(0)
 
         # apply pre transformer fully connected layer:
-        if self.use_pre_transformer_fc_layer:
-            x = self.relu(self.linear_1(x))
+        x = self.relu(self.linear_1(x))
 
         ###### Encoder Part ######
         # x dimension is (batch_size, sequence_length, d_model)
-        # with d_model either
-        #   = 1                     if not use_pre_transformer_fc_layer or
-        #   = hidden_layer_size     if use_pre_transformer_fc_layer
+        # with d_model = hidden_layer_size
         seq_len = x.size(1)
         if seq_len > self.max_seq_len:
             raise ValueError(f"Input sequence length {seq_len} exceeds max_seq_len {self.max_seq_len}")
@@ -206,34 +220,54 @@ class TransformerModel(nn.Module):
         # output dimension is identical
 
         ###### Decoder Part ######
-        # decoder input starts with 0's then gets auto-regressively extended along dimension 1
+        if self.use_start_token:  # utilise learnable BOS token:
+            decoder_input = self.start_token.repeat(batch_size, 1, 1)
+            # .repeat duplicates a tensor
+        else:  # initialise decoder_input that then gets auto-regressively extended along dimension 1
+            decoder_input = encoder_output[: -1:, :]  # use last encoder features as starting point
+        # dimension of decoder_input in both cases is (batch_size, 1, d_model)
+
+        ''' alternative: zero-initialisation (didn't work well)
         # during the process the decoder leverages the encoder_output as context (memory)
         decoder_input = torch.zeros(batch_size,
                                     1,  # this dimension grows during the loop below
                                     self.d_model).to(x.device)
-        outputs = torch.empty(size=(batch_size, self.n_forecast_steps), device=x.device,
-                              dtype=x.dtype)  # initialise empty tensor for outputs
+        '''
 
+        # initialise empty tensor for outputs:
+        outputs = torch.empty(size=(batch_size, self.n_forecast_steps), device=x.device, dtype=x.dtype)
+
+        # iterative auto-regressive prediction:
         for output_sequence_ind in range(self.n_forecast_steps):
             # target is the output sequence, which is build step-by-step
             tgt = decoder_input + self.decoder_positional_encoding[:, :decoder_input.size(1), :]  # incorporate positional encoding
-            out = self.transformer_decoder(tgt, memory=encoder_output)  # leverage encoder_output
+
+            # causal mask to prevent peeking at future tokens:
+            tgt_mask = nn.Transformer.generate_square_subsequent_mask(sz=tgt.size(1)).to(x.device)
+
+            # run decoder:
+            out = self.transformer_decoder(tgt,
+                                           memory=encoder_output,  # leverage encoder_output, available through cross-attention layers
+                                           tgt_mask=tgt_mask,  # use causal mask
+                                           )
 
             # derive prediction:
             next_step = self.output_projection(out[:, -1:, :])  # predict next value based on last output_projection of output time-step
-            next_step = next_step.squeeze(-1)  # remove trailing singleton dimension -> size: (batch_size, 1)
-            outputs[:, output_sequence_ind] = next_step.squeeze(-1)  # save to outputs
+
+            # remove trailing singleton dimension -> size: (batch_size, 1)
+            # and add to outputs
+            outputs[:, output_sequence_ind] = next_step.squeeze(-1).squeeze(-1)  # save to outputs
 
             # Update decoder_input:
             #   if y is provided and with teacher_forcing_ratio probability: use actual ground_truth
             if y is not None and torch.rand(1).item() < teacher_forcing_ratio:
-                ground_truth = y[:, output_sequence_ind:output_sequence_ind + 1]
-                # if use_pre_transformer_fc_layer, the decoder expects d_model dimensionality, hence upscale next_input with linear layer:
-                next_input = self.linear_1(ground_truth.unsqueeze(-1)) if self.use_pre_transformer_fc_layer else ground_truth.unsqueeze(-1)
+                ground_truth = y[:, output_sequence_ind:output_sequence_ind + 1].unsqueeze(-1)
+                # the decoder expects d_model dimensionality, hence upscale next_input with linear layer:
+                next_input = self.linear_1(ground_truth)
             #   else: use last prediction
             else:
                 # analogously:
-                next_input = self.linear_1(next_step.unsqueeze(-1)) if self.use_pre_transformer_fc_layer else next_step.unsqueeze(-1)
+                next_input = self.linear_1(next_step)
             decoder_input = torch.cat([decoder_input, next_input], dim=1)  # concatenate along dimension 1
 
         return outputs  # (batch_size, n_forecast_steps)
@@ -317,6 +351,29 @@ class TransformerModel(nn.Module):
                 predictions = np.concatenate((predictions, out))
 
             return predictions
+
+    def print_weights(self, only_check_extrema=False):
+        """ Sanity check. """
+        for name, param in self.named_parameters():
+            if only_check_extrema:
+                if torch.isnan(param).any():
+                    print(f"{name} contains NaN values! mean: {param.mean().item()}, std: {param.std().item()}")
+                elif torch.isinf(param).any():
+                    print(f"{name} contains Inf values! mean: {param.mean().item()}, std: {param.std().item()}")
+            else:
+                print(name, param.mean().item(), param.std().item())
+
+    def print_gradients(self, only_check_extrema=False):
+        """ Sanity check. """
+        for name, param in self.named_parameters():
+            if param.grad is not None:
+                if only_check_extrema:
+                    if torch.isnan(param.grad).any():
+                        print(f"{name} contains NaN values! mean: {param.grad.mean().item()}, std: {param.grad.std().item()}")
+                    elif torch.isinf(param.grad).any():
+                        print(f"{name} contains Inf values! mean: {param.grad.mean().item()}, std: {param.grad.std().item()}")
+                else:
+                    print(name, param.grad.mean().item(), param.grad.std().item())
 
 
 class LSTMModel(nn.Module):
@@ -1430,12 +1487,12 @@ class TransformerPredictor(NNPredictor):
 
                  # transformer-specific parameters:
                  model_load_file_path: str = None,
-                 hidden_transformer_layer_size: int = 2048,
+                 hidden_transformer_layer_size: int = 256,
                  n_transformer_layers: int = 6,
                  n_transformer_heads: int = 8,
                  dropout: float = 0.3,
-                 use_pre_transformer_fc_layer: bool = True,
                  init_weights: bool = True,
+                 use_start_token: bool = True,
 
                  # training parameters:
                 model_save_directory: str = None,
@@ -1472,8 +1529,8 @@ class TransformerPredictor(NNPredictor):
         self._n_transformer_layers = n_transformer_layers
         self._n_transformer_heads = n_transformer_heads
         self._dropout = dropout
-        self._use_pre_transformer_fc_layer = use_pre_transformer_fc_layer
         self._init_weights = init_weights
+        self._use_start_token = use_start_token
 
         # model placeholder and import:
         self._transformer_model = None
@@ -1500,7 +1557,7 @@ class TransformerPredictor(NNPredictor):
     def describe(self):
         intro_str = "------------------- TransformerPredictor Instance -------------------\n\n"
         data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /14} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- randomise validation: {self.randomise_validation}\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
-        model_str = f"Model Attributes:\n- hidden transformer layer size: {self.hidden_transformer_layer_size}\n- number of transformer layers: {self.n_transformer_layers}\n- number of transformer heads: {self.n_transformer_heads}\n- pre transformer fully connected layer: {self.use_pre_transformer_fc_layer}\n\n"
+        model_str = f"Model Attributes:\n- hidden transformer layer size: {self.hidden_transformer_layer_size}\n- number of transformer layers: {self.n_transformer_layers}\n- number of transformer heads: {self.n_transformer_heads}\n- use learnable start token: {self.use_start_token}\n\n"
         if self.n_train_epochs is not None:
             training_str = f"Training Attributes:\n- final training loss: {self.loss_train}\n- final validation loss: {self.loss_val}\n- final training hit-rate: {self.hit_rate_train}\n- final validation hit-rate: {self.hit_rate_val}"
         else:
@@ -1553,17 +1610,6 @@ class TransformerPredictor(NNPredictor):
         self._predictions_val = self._predictions_train = None
 
     @property
-    def use_pre_transformer_fc_layer(self):
-        return self._use_pre_transformer_fc_layer
-
-    @use_pre_transformer_fc_layer.setter
-    def use_pre_transformer_fc_layer(self, value):
-        """ Changing value re-initialises transformer model. """
-        self._use_pre_transformer_fc_layer = value
-        self._transformer = None
-        self._predictions_val = self._predictions_train = None
-
-    @property
     def init_weights(self):
         return self._init_weights
 
@@ -1571,6 +1617,17 @@ class TransformerPredictor(NNPredictor):
     def init_weights(self, value):
         """ Changing value re-initialises transformer model. """
         self._init_weights = value
+        self._transformer_model = None
+        self._predictions_val = self._predictions_train = None
+
+    @property
+    def use_start_token(self):
+        return self._use_start_token
+
+    @use_start_token.setter
+    def use_start_token(self, value):
+        """ Changing value re-initialises transformer model. """
+        self._use_start_token = value
         self._transformer_model = None
         self._predictions_val = self._predictions_train = None
 
@@ -1583,9 +1640,9 @@ class TransformerPredictor(NNPredictor):
                                                        n_heads=self.n_transformer_heads,
                                                        n_forecast_steps=self.forecast_horizon,
                                                        dropout=self.dropout,
-                                                       use_pre_transformer_fc_layer=self.use_pre_transformer_fc_layer,
                                                        init_weights=self.init_weights,
-                                                       max_seq_len=self.rolling_window_size,)
+                                                       max_seq_len=self.rolling_window_size,
+                                                       use_start_token=self.use_start_token,)
             self._transformer_model.to(self.device)
             try:
                 self._transformer_model = torch.compile(self._transformer_model)
@@ -1601,10 +1658,9 @@ class TransformerPredictor(NNPredictor):
         self._transformer_model = value
         # set other properties based on model parameters:
         try:
-            a = value.linear_1  # try accessing layer
-            self._use_pre_transformer_fc_layer = True if (a is not None) else False
-        except AttributeError:  # if not found
-            self._use_pre_transformer_fc_layer = False
+            b = value.start_token  # try accessing start token
+            self._use_start_token = True if (b is not None) else False
+        except AttributeError: self._use_start_token = False
         self._n_transformer_heads = value.transformer_encoder.encoder_layer.nhead
         self._hidden_transformer_layer_size = value.transformer_encoder.encoder_layer.dim_feedforward
         self._n_transformer_layers = value.transformer_encoder.num_layers

@@ -37,19 +37,23 @@ if __name__ == "__main__":
         price_csv_path=filemgmt.most_recent_file(INTERPOLATED_PRICES, '.csv', 'at 7d'),
         daily_prediction_hour=16,  # these are necessary data properties which still need to be set
         rolling_window_size=6 * 4,  # i.e. 6 months á 4 weeks
-        forecast_horizon=3,  # i.e. 3 weeks
+        forecast_horizon=1,  # 3,  # i.e. 3 weeks
         sampling_rate_minutes=7 * 14 * 60,  # 1 week = 7 days each from 8am to 22pm
-        validation_split=.2,
+        validation_split=.9,  # overfit a tiny batch
+        randomise_validation=False,
+        batch_size=64,
 
+        initial_lr=.00001,  # stability
         # model parameters:
         init_weights=True,
         hidden_transformer_layer_size=512,
-        n_transformer_layers=6,
-        n_transformer_heads=1,
+        n_transformer_layers=1,
+        n_transformer_heads=6,
         forecast_step_loss_weight_range=(.7, 1.0),
-        use_pre_transformer_fc_layer=True,
-        dropout=.4
+        dropout=.1
     )
 
-    transformer_predictor.run_training(custom_n_epochs=100, custom_early_stopping_patience=10,
-                                       visualise_validation_predictions_every=None)
+
+    transformer_predictor.run_training(custom_n_epochs=20, custom_early_stopping_patience=20,
+                                       visualise_validation_predictions_every=5, teacher_forcing_ratio=.5)
+    print('Halt')
