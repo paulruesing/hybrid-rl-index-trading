@@ -194,13 +194,13 @@ def create_rolling_window_view(input_series: pd.Series,
     to the targets always starting at the first sample after 3 pm.
     This further requires specifying sampling_rate_minutes to find the first entry in that prediction hour.
     """
+    ### create rolling window views:
     # sliding window view as matrix: last column are current prices, 1st to (rolling-window-size - 1)th column are retrospective prices:
     X = np.lib.stride_tricks.sliding_window_view(input_series.to_numpy(),
                                                        window_shape=rolling_window_size)[
               :-forecast_horizon]  # last rows (latest values) are removed (because contained only in target values)
     X_dates = np.lib.stride_tricks.sliding_window_view(input_series.index.to_numpy(),
-                                                             window_shape=rolling_window_size)[
-                    :-forecast_horizon]
+                                                             window_shape=rolling_window_size)[:-forecast_horizon]
 
     # target values are subsequent prices, window size here is referred to as the forecast_horizon:
     Y = np.lib.stride_tricks.sliding_window_view(input_series.to_numpy(),
@@ -214,8 +214,10 @@ def create_rolling_window_view(input_series: pd.Series,
 
     if daily_prediction_hour is not None:
         # specify prediction start mask:
-        target_date_index = input_series[
-                            rolling_window_size:-forecast_horizon + 1].index  # first and last rows are removed here according to the rolling windows
+        clipped_input_series = input_series.iloc[rolling_window_size:]  # first rows are removed because necessary for rolling window
+        if forecast_horizon > 1:  # last rows are removed because necessary for targets that exceed provided data
+            clipped_input_series = clipped_input_series.iloc[:-forecast_horizon + 1]
+        target_date_index = clipped_input_series.index  # relevant dates
         if sampling_rate_minutes >= 60:  # if sampling rate larger than 1 hour, no need for minute check:
             prediction_start_mask = (target_date_index.hour == daily_prediction_hour)
             if verbose: print(

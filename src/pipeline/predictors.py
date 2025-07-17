@@ -115,7 +115,9 @@ class TransformerModel(nn.Module):
                                                    batch_first=True,  # then input is (batch_size, sequence_length, d_model)
                                                    )
         # stack encoder layers:
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers,
+                                                         enable_nested_tensor=(n_heads % 2 == 0),  # only allowed if n_heads is even
+                                                         )
 
         # specify decoder layers:
         decoder_layer = nn.TransformerDecoderLayer(d_model=self.d_model,
@@ -124,7 +126,9 @@ class TransformerModel(nn.Module):
                                                    dropout=dropout,
                                                    batch_first=True,  # then input is (batch_size, sequence_length, d_model)
                                                    )
-        self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
+        self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers,
+                                                         enable_nested_tensor=(n_heads % 2 == 0),  # only allowed if n_heads is even
+                                                         )
 
         # final output projection to one feature per forecast step:
         # linear layer is applied to last dimension of input tensor (that is: d_model)
@@ -188,8 +192,8 @@ class TransformerModel(nn.Module):
         ###### Encoder Part ######
         # x dimension is (batch_size, sequence_length, d_model)
         # with d_model either
-        #   = 1 if not use_pre_transformer_fc_layer or
-        #   = hidden_layer_size if use_pre_transformer_fc_layer
+        #   = 1                     if not use_pre_transformer_fc_layer or
+        #   = hidden_layer_size     if use_pre_transformer_fc_layer
         seq_len = x.size(1)
         if seq_len > self.max_seq_len:
             raise ValueError(f"Input sequence length {seq_len} exceeds max_seq_len {self.max_seq_len}")
@@ -232,7 +236,7 @@ class TransformerModel(nn.Module):
                 next_input = self.linear_1(next_step.unsqueeze(-1)) if self.use_pre_transformer_fc_layer else next_step.unsqueeze(-1)
             decoder_input = torch.cat([decoder_input, next_input], dim=1)  # concatenate along dimension 1
 
-        return outputs.squeeze(-1)  # (batch_size, n_forecast_steps)
+        return outputs  # (batch_size, n_forecast_steps)
 
     def run_epoch(self, dataloader, optimiser, device='cpu', loss_criterion=nn.MSELoss(),
                   is_training=False, teacher_forcing_ratio: float = 0.5):
@@ -644,7 +648,7 @@ class NNPredictor:
         if daily_prediction_hour is None and verbose: print(
             'No daily prediction hour defined yet, hence currently predictions are carried out at every time step. Define daily_prediction_hour to change this.')
 
-    # data import parameters:
+    ### data import properties:
     @property
     def sampling_rate_minutes(self):
         return self._sampling_rate_minutes
@@ -822,7 +826,7 @@ class NNPredictor:
     def dataloader_val(self):
         return DataLoader(self.dataset_val, batch_size=self.batch_size, shuffle=True)
 
-    ### training properties:
+    ### training properties: ###
     @property
     def use_mps_if_available(self):
         return self._use_mps_if_available
@@ -871,7 +875,7 @@ class NNPredictor:
     def early_stopping_patience(self):
         return self._early_stopping_patience
 
-    ### prediction properties:
+    ### prediction properties: ###
     @property
     def predictions_train(self):
         if self._predictions_train is None:
@@ -884,7 +888,7 @@ class NNPredictor:
             self._predictions_val = self.nn_model.predict(self.dataloader_val, device=self.device)
         return self._predictions_val
 
-    ### evaluation properties:
+    ### evaluation properties: ###
     @property
     def forecast_step_loss_weight_range(self):
         return self._forecast_step_loss_weight_range
@@ -924,7 +928,7 @@ class NNPredictor:
         """ How often model predicts right direction of price development (hit rate) in validation samples. """
         return metrics.HitRateMetric()(self.predictions_val, self.Y_val, self.X_val)
 
-    ### data preparation methods:
+    ### data preparation methods: ###
     def import_data(self):
         """ Import data from LSTMPredictor.price_csv_path file. """
         self._price_series = preprocessing.read_price_csv(csv_path=self._price_csv_path,
@@ -1005,24 +1009,28 @@ class NNPredictor:
             day_slice = (0, len(predictions))
 
         # plot result for daily multi-step predictions:
+        marker = None if self.forecast_horizon > 1 else 'o'  # need to specify marker if single predictions are plotted
         fig, ax = plt.subplots(figsize=plot_size)
         for ind, (x_datetime, features, y_datetime, pred, target) in enumerate(
                 zip(X_dates, X, Y_dates, predictions, Y)):
             # plot only days within day_slice:
             if ind / predictions_per_day < day_slice[0]: continue
             if ind / predictions_per_day >= day_slice[1]: break  # plot only that many days
+
             # plot features:
             ax.plot(x_datetime, self._normaliser.inverse_transform(features), color=X_color)
             # plot prediction and target:
-            ax.plot(y_datetime, self._normaliser.inverse_transform(target), color=Y_color, linewidth=3)
-            ax.plot(y_datetime, self._normaliser.inverse_transform(pred), color=pred_color, linestyle='--')
+            ax.plot(y_datetime, self._normaliser.inverse_transform(target), color=Y_color, linewidth=3, marker=marker)
+            ax.plot(y_datetime, self._normaliser.inverse_transform(pred), color=pred_color, linestyle='--', marker=marker)
 
         ax.set_xlabel('Date')
         ax.set_ylabel('Price')
         ax.set_title('Result Overview' if custom_plot_title is None else custom_plot_title)
         legend_elements = [Line2D([0], [0], color=X_color, label='Training Prices'),
-                           Line2D([0], [0], color=Y_color, label='Target Prices', linewidth=3),
-                           Line2D([0], [0], color=pred_color, label='Predicted Prices', linestyle='--'), ]
+                           Line2D([0], [0], color=Y_color, label='Target Prices', linewidth=3,
+                                  marker=marker),
+                           Line2D([0], [0], color=pred_color, label='Predicted Prices', linestyle='--',
+                                  marker=marker), ]
         ax.legend(handles=legend_elements)
         ax.grid(True)
         plt.show()
