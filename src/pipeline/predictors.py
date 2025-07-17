@@ -253,7 +253,7 @@ class TransformerModel(nn.Module):
             Whether to perform training (True) or evaluation (False).
         teacher_forcing_ratio : float, default 0.5
             probability for feeding ground truth as decoder input instead of previous prediction.
-            accelerates convergence and stablises training.
+            accelerates convergence and stabilises training.
 
         Returns
         -------
