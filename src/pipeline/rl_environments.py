@@ -255,7 +255,7 @@ class RLTradingEnv(gym.Env):
                 isin = self.product_set.get_product_from_leverage_span(date=self.current_step_timestamp,
                                                                        direction=direction, leverage_span=leverage_span)
             except KeyError:  # no product found
-                print(f"No product with leverage inside {leverage_span} found. Using next smaller leverage.")
+                if self.verbose: print(f"No product with leverage inside {leverage_span} found. Using next smaller leverage.")
                 try:
                     isin = self.product_set.get_product_from_leverage_span(date=self.current_step_timestamp,
                                                                            direction=direction,
@@ -265,7 +265,7 @@ class RLTradingEnv(gym.Env):
                                                                            # sort in decreasing order
                                                                            )
                 except KeyError:  # still no product found, then return
-                    print(f"No product with smaller leverage available. Return")
+                    if self.verbose: print(f"No product with smaller leverage available. Return")
                     return
 
             # current price:
