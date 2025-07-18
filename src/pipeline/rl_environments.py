@@ -1,10 +1,13 @@
 import src.pipeline.preprocessing as preprocessing
 from src.pipeline.predictors import LSTMPredictor
 from src.pipeline.financial_products import KOCertificate, KOCertificateSet
+from src.utils import file_management as filemgmt
+from src.pipeline.rl_agents import MultiProductAgent
 
 from itertools import product
 import gym
 from gym import spaces
+from stable_baselines3 import DQN
 from typing import Union, Literal
 import numpy as np
 import pandas as pd
@@ -33,6 +36,7 @@ class RLTradingEnv(gym.Env):
                  # at 1.0 each trade is sized acccording to total balance / amount of leverage categories
                  possible_trade_quantities: Literal['all', 'fixed', 'arbitrary'] = 'all',  # used to define action space
                  sell_opposite_direction_if_no_cash: bool = True,
+                 sell_all_opposite_products_if_no_cash: bool = True,
                  starting_cash=1000000,
                  commission_rate=0.001,  # reflects a typical spread, because we can trade commission-free through wikifolio
                  verbose=True,
@@ -67,10 +71,11 @@ class RLTradingEnv(gym.Env):
             Whether to include an additional category for leverage greater than the last entry.
         trading_quantity_per_leverage_factor : float, default 1.0
             Determines trade size as a fraction of balance per leverage category.
-        possible_trade_quantities : {'all', 'fixed', 'arbitrary'}, default 'all'
-            Constraint on how trade quantities are defined.
         sell_opposite_direction_if_no_cash : bool, default True
             If insufficient cash for buying operation: sell opposite certificates.
+        sell_all_opposite_products_if_no_cash : bool, default True
+            If sell_opposite_products_if_no_cash is True and this is True, sells ALL opposite products.
+            If this is False, sells only opposite leverage (if long = 1, short = 5) of products.
         starting_cash : float, default 1000000
             Initial cash balance for the agent.
         commission_rate : float, default 0.001
@@ -107,17 +112,8 @@ class RLTradingEnv(gym.Env):
         self._include_open_leverage_category = include_open_leverage_category
         self.trading_quantity_per_leverage_factor = trading_quantity_per_leverage_factor
         self.sell_opposite_direction_if_no_cash = sell_opposite_direction_if_no_cash
-        self._possible_trade_quantities = possible_trade_quantities
+        self.sell_all_opposite_products_if_no_cash = sell_all_opposite_products_if_no_cash
         self._action_enum = None
-
-        if possible_trade_quantities == 'all':
-            pass
-        elif possible_trade_quantities == 'fixed':
-            raise NotImplementedError("Fixed trading quantities are yet to be implemented.")
-        elif possible_trade_quantities == 'arbitrary':
-            raise NotImplementedError("Arbitrary trading quantities are yet to be implemented.")
-        else:
-            raise ValueError("possible_trade_quantities can only be 'all', 'fixed', 'arbitrary'")
 
         self.action_space = spaces.Discrete(len(self.action_enum))  # is re-written within self.action_enum property
 
@@ -290,13 +286,18 @@ class RLTradingEnv(gym.Env):
             # todo: think, whether here a threshold is better than == 0
             if maximum_buyable_shares == 0 and self.sell_opposite_direction_if_no_cash:
                 opposite_direction = 'short' if direction == 'long' else 'long'
-                if self.verbose: print(f"Couldn't buy {direction} certificates because cash quote too low. Sellling {opposite_direction} certificates now.")
 
-                # derive opposite leverage:
-                opposite_leverage_index = len(self.leverage_categories) - self.leverage_categories.index(
-                    leverage_span[0]) - 2
-                if opposite_leverage_index == -1: opposite_leverage_index = 0  # if buying highest leverage, e.g. (4.5-5) or (>5) sell all low positions
-                opposite_leverage = self.leverage_categories[opposite_leverage_index]
+                # sell all opposite products:
+                if self.sell_all_opposite_products_if_no_cash:
+                    opposite_leverage = 1.0
+                else:  # derive opposite leverage:
+                    opposite_leverage_index = len(self.leverage_categories) - self.leverage_categories.index(
+                        leverage_span[0]) - 2
+                    if opposite_leverage_index == -1: opposite_leverage_index = 0  # if buying highest leverage, e.g. (4.5-5) or (>5) sell all low positions
+                    opposite_leverage = self.leverage_categories[opposite_leverage_index]
+
+                if self.verbose: print(
+                    f"Couldn't buy {direction} certificates because cash quote too low. Trying to sell {opposite_direction} certificates with leverage higher than {opposite_leverage} now.")
 
                 # prepare opposite selling operation:
                 type = 'Sell'
@@ -444,24 +445,8 @@ class RLTradingEnv(gym.Env):
         self._leverage_categories = value
 
     @property
-    def possible_trade_quantities(self) -> Literal['all', 'fixed', 'arbitrary']:
-        """
-        {'all', 'fixed', 'arbitrary'} : Defines how trade quantities are constrained.
-        """
-        # sanity check:
-        if self._possible_trade_quantities != 'all' and self._possible_trade_quantities != 'fixed' and self._possible_trade_quantities == 'arbitrary':
-            raise ValueError("possible_trade_quantities can only be 'all', 'fixed', 'arbitrary'. Please redefine.")
-        return self._possible_trade_quantities
-
-    @possible_trade_quantities.setter
-    def possible_trade_quantities(self, value: Literal['all', 'fixed', 'arbitrary']):
-        """ possible_trade_quantities setter. Resets action space. """
-        self._action_enum = None
-        self._possible_trade_quantities = value
-
-    @property
     def action_enum(self) -> enum.Enum:
-        """ Action enum class, dynamically created according to possible_trade_quantities, leverage_categories and product_set. """
+        """ Action enum class, dynamically created according to leverage_categories and product_set. """
         if self._action_enum is None:
             # create action space labels: order is Buy Long, Sell Long, Buy Short, Sell Short for each leverage category
             leverage_span_tuples = [
@@ -608,3 +593,124 @@ class RLTradingEnv(gym.Env):
                          }
         return pd.DataFrame(index=open_isins,
                             data=data_dict)
+
+    def run_env_backtest(self,
+                         agent: Union[MultiProductAgent, DQN],
+                         mute_environment: bool = True,
+                         reset_environment: bool = True,
+                         track_portfolio_exposure_every: int = 10,
+                         save_log_directory: str = None,
+                         plot_results: bool = True,
+                         **plot_kwargs
+                         ):
+        """ Simulate agent behavior in environment. """
+        if reset_environment: obs = self.reset()  # reset episode and fetch first observation
+        if mute_environment: self.verbose = False
+
+        # initialise log frame:
+        log = pd.DataFrame()
+        for ind in tqdm(range(self.current_step, self.total_steps)):
+            action, _ = agent.predict(obs)  # infer action
+            obs, _, done, info = self.step(action, track_portfolio_exposure=(
+                        ind % track_portfolio_exposure_every == 0))  # retrieve new observation and info
+
+            if done: break  # check whether episode is finished
+            log = pd.concat([log, pd.DataFrame(info, index=[info['Step']])])  # log info
+
+        # compute benchmark:
+        benchmark = self.starting_cash / self.price_series.loc[log['Time'].iloc[0]] * self.price_series.loc[
+            log['Time']]  # construct benchmark return if HODL
+        log.set_index('Time', inplace=True)
+        log['Benchmark'] = benchmark
+
+        if save_log_directory:  # eventually save model
+            log.to_csv(save_log_directory / filemgmt.file_title("Environment Backtest Log", dtype_suffix='.csv'))
+
+        if plot_results:
+            self.plot_backtest_results(log, agent=agent, **plot_kwargs)
+
+    def plot_backtest_results(self, log_df: pd.DataFrame,
+                              agent: Union[MultiProductAgent, DQN] = None,
+                              save_fig_directory: str = None, ):
+        """ Visualize backtest results. """
+        val_df = log_df.loc[:,
+                 [f'Avg. Expected Potential / {self.potential_horizon_days}d', 'Total Exposure', 'Cash', 'Total']]
+        val_df['Policy'] = log_df['Total'] / log_df['Benchmark'].iloc[0]
+        val_df['Benchmark'] = log_df['Benchmark'] / log_df['Benchmark'].iloc[0]
+
+        fig, (return_ax, exposure_ax, cash_ax) = plt.subplots(3, 1, figsize=(16, 13))
+        potential_ax = exposure_ax.twinx()
+        dates = pd.to_datetime(log_df.index)
+
+        # portfolio performance:
+        return_ax.plot(dates, val_df['Policy'], color='orange', label='Policy')
+        return_ax.plot(dates, val_df['Benchmark'], color='blue', label='Benchmark')
+        return_ax.set_title('Normalized Policy vs. Benchmark')
+        return_ax.set_xlabel('Date')
+        return_ax.set_ylabel('Normalized Balance')
+        return_ax.legend()
+        return_ax.grid(True)
+
+        # include potential thresholds:
+        potentials = val_df[f'Avg. Expected Potential / {self.potential_horizon_days}d'] * 100
+        if isinstance(agent, MultiProductAgent):
+            # scale and derive thresholds:
+            scaled_thresholds = [threshold * sign * 100 for threshold, sign in
+                                 product(agent.abs_potential_treshold_steps, [-1, 1])]
+            # plot threshold lines:
+            for ind, scaled_threshold in enumerate(scaled_thresholds):
+                potential_ax.axhline(y=scaled_threshold, color='purple',
+                                     linestyle=':', alpha=.3,
+                                     label='Action Thresholds' if ind == 0 else '_',
+                                     # create legend entry only for first line
+                                     )
+
+            # avg potential:
+            potentials = val_df[f'Avg. Expected Potential / {self.potential_horizon_days}d'] * 100
+            buy_long_signals = np.where(potentials > scaled_thresholds[3], potentials, np.nan)
+            potential_ax.plot(dates, buy_long_signals, color='green', label='Buy Long Signal')
+            sell_short_signals = np.where((potentials > scaled_thresholds[1]) & (potentials < scaled_thresholds[3]),
+                                          potentials, np.nan)
+            potential_ax.plot(dates, sell_short_signals, color='lightgreen', label='Sell Short Signal')
+            sell_long_signals = np.where((potentials > scaled_thresholds[2]) & (potentials < scaled_thresholds[0]),
+                                         potentials, np.nan)
+            potential_ax.plot(dates, sell_long_signals, color='lightcoral', label='Sell Long Signal')
+            buy_short_signals = np.where(potentials < scaled_thresholds[2], potentials, np.nan)
+            potential_ax.plot(dates, buy_short_signals, color='red', label='Buy Short Signal')
+        else:  # if agent doesn't follow a manual agenda:
+            potential_ax.plot(dates, potentials, color='green', label='Expected Potential')
+
+        # portfolio exposure:
+        exposure_ax.plot(dates, val_df['Total Exposure'], color='black', label='Portfolio Exposure', marker='o',
+                         markersize=5)
+
+        # cash quote:
+        cash_percent = (val_df['Cash'] / val_df['Total']) * 100
+        cash_ax.plot(dates, cash_percent, color='black', label='Cash Quote [%]')
+        cash_ax.fill_between(dates, 0, cash_percent, color='grey', alpha=.15, label='Cash')
+        cash_ax.fill_between(dates, cash_percent, 100, color='purple', alpha=.15, label='Stock Holding')
+        cash_ax.set_ylim([0, 100])
+        cash_ax.set_xlabel('Date');
+        cash_ax.set_ylabel('Share of Total Portfolio [%]')
+        cash_ax.set_title('Portfolio Composition Cash vs. Holding')
+        cash_ax.legend(loc='upper left');
+        cash_ax.grid(True)
+
+        # formatting:
+        exposure_ax.set_xlabel('Date')
+        exposure_ax.legend(loc='upper left');
+        potential_ax.legend(loc='lower right')
+        exposure_ax.set_ylabel('Total Exposure [x]');
+        potential_ax.set_ylabel(f'Expected Forward Potential / {self.potential_horizon_days}d [%]')
+        exposure_ax.set_ylim([-5, 5])
+        max_potential = np.max(val_df[f'Avg. Expected Potential / {self.potential_horizon_days}d'] * 100);
+        potential_ax.set_ylim([-100, 100])
+        exposure_ax.set_title('Portfolio Exposure and Predicted Potential')
+        exposure_ax.grid(True)
+
+        fig.tight_layout()
+
+        if save_fig_directory is not None:  # eventually save result plot:
+            plt.savefig(save_fig_directory / filemgmt.file_title("Backtest Result Visualisation", ".png"))
+
+        plt.show()
