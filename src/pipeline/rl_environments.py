@@ -32,6 +32,7 @@ class RLTradingEnv(gym.Env):
                  trading_quantity_per_leverage_factor: float = 1.0,
                  # at 1.0 each trade is sized acccording to total balance / amount of leverage categories
                  possible_trade_quantities: Literal['all', 'fixed', 'arbitrary'] = 'all',  # used to define action space
+                 sell_opposite_direction_if_no_cash: bool = True,
                  starting_cash=1000000,
                  commission_rate=0.001,  # reflects a typical spread, because we can trade commission-free through wikifolio
                  verbose=True,
@@ -68,6 +69,8 @@ class RLTradingEnv(gym.Env):
             Determines trade size as a fraction of balance per leverage category.
         possible_trade_quantities : {'all', 'fixed', 'arbitrary'}, default 'all'
             Constraint on how trade quantities are defined.
+        sell_opposite_direction_if_no_cash : bool, default True
+            If insufficient cash for buying operation: sell opposite certificates.
         starting_cash : float, default 1000000
             Initial cash balance for the agent.
         commission_rate : float, default 0.001
@@ -103,6 +106,7 @@ class RLTradingEnv(gym.Env):
         self._leverage_categories = leverage_categories
         self._include_open_leverage_category = include_open_leverage_category
         self.trading_quantity_per_leverage_factor = trading_quantity_per_leverage_factor
+        self.sell_opposite_direction_if_no_cash = sell_opposite_direction_if_no_cash
         self._possible_trade_quantities = possible_trade_quantities
         self._action_enum = None
 
@@ -283,7 +287,23 @@ class RLTradingEnv(gym.Env):
                     f"[STEP {self.current_step}] Bought {shares_to_buy} shares of {isin} ({direction} with leverage in {leverage_span}) at {price}.")
                 print(f"    Cash: {self.cash}, Holding: {self.current_holding}")
 
-        elif type == 'Sell':
+            # todo: think, whether here a threshold is better than == 0
+            if maximum_buyable_shares == 0 and self.sell_opposite_direction_if_no_cash:
+                opposite_direction = 'short' if direction == 'long' else 'long'
+                if self.verbose: print(f"Couldn't buy {direction} certificates because cash quote too low. Sellling {opposite_direction} certificates now.")
+
+                # derive opposite leverage:
+                opposite_leverage_index = len(self.leverage_categories) - self.leverage_categories.index(
+                    leverage_span[0]) - 2
+                if opposite_leverage_index == -1: opposite_leverage_index = 0  # if buying highest leverage, e.g. (4.5-5) or (>5) sell all low positions
+                opposite_leverage = self.leverage_categories[opposite_leverage_index]
+
+                # prepare opposite selling operation:
+                type = 'Sell'
+                leverage_span = (opposite_leverage, leverage_span[1])
+                direction = opposite_direction
+
+        if type == 'Sell':
             # select all products with leverages inside span and higher:
             # todo: reflect whether all products with higher leverages should remain, or whether only inside span should be sold
             open_candidates = self.open_positions.loc[self.open_positions.Direction == direction]
