@@ -640,7 +640,7 @@ class NNPredictor:
                  rolling_window_size: int = 32,
                  forecast_horizon: int = 12,
                  validation_split: float = 0.2,
-                 randomise_validation: bool = True,
+                 randomise_validation_data_every: int = 10,
                  batch_size: int = 32,
 
                  forecast_step_loss_weight_range: [float, float] = (1, 0.7),  # eval parameter
@@ -667,7 +667,7 @@ class NNPredictor:
         self._rolling_window_size = rolling_window_size
         self._forecast_horizon = forecast_horizon
         self._validation_split = validation_split
-        self.randomise_validation = randomise_validation
+        self.randomise_validation_data_every = randomise_validation_data_every
         self._batch_size = batch_size
         self.verbose = verbose
         self._use_mps_if_available = use_mps_if_available
@@ -1030,7 +1030,7 @@ class NNPredictor:
                                                          Y_dates=self.Y_dates,
                                                          verbose=self.verbose if verbose is None else verbose,
                                                          validation_split=self.validation_split,
-                                                         randomise=self.randomise_validation)
+                                                         randomise=(self.randomise_validation_data_every is not None))
         self._predictions_train = self._predictions_val = None  # and reset predictions
 
     ### plotting methods:
@@ -1148,7 +1148,7 @@ class NNPredictor:
                 scheduler.step()
 
             # eventually randomise validation and training data:
-            if self.randomise_validation:
+            if epoch % self.randomise_validation_data_every == 0:
                 self.split_data(verbose=False)  # verbose=False to prevent status messages in every epoch
 
             loss_train_history.append(loss_train);
@@ -1264,7 +1264,7 @@ class LSTMPredictor(NNPredictor):
                  rolling_window_size: int = 32,
                  forecast_horizon: int = 12,
                  validation_split: float = 0.2,
-                 randomise_validation: bool = True,
+                 randomise_validation_data_every: int = 10,
                  batch_size: int = 32,
                  forecast_step_loss_weight_range: [float, float] = (1, 0.7),  # eval parameter
                  use_mps_if_available: bool = False,  # training parameter
@@ -1291,7 +1291,7 @@ class LSTMPredictor(NNPredictor):
         super().__init__(price_csv_path=price_csv_path, date_column=date_column,
                          price_column=price_column, rolling_window_size=rolling_window_size,
                          forecast_horizon=forecast_horizon, sampling_rate_minutes=sampling_rate_minutes,
-                         validation_split=validation_split, randomise_validation=randomise_validation,
+                         validation_split=validation_split, randomise_validation_data_every=randomise_validation_data_every,
                          daily_prediction_hour=daily_prediction_hour,
                          predict_before_daily_prediction_hour=predict_before_daily_prediction_hour,
                          batch_size=batch_size, forecast_step_loss_weight_range=forecast_step_loss_weight_range,
@@ -1339,7 +1339,7 @@ class LSTMPredictor(NNPredictor):
 
     def describe(self):
         intro_str = "------------------- LSTMPredictor Instance -------------------\n\n"
-        data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /14} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- randomise validation: {self.randomise_validation}\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
+        data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /14} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- randomise validation data every: {self.randomise_validation_data_every}th epoch\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
         model_str = f"Model Attributes:\n- hidden LSTM layers: {self.hidden_lstm_layer_size}\n- number of LSTM layers: {self.n_lstm_layers}\n- pre LSTM fully connected layer: {self.use_pre_lstm_fc_layer}\n\n"
         if self.n_train_epochs is not None:
             training_str = f"Training Attributes:\n- final training loss: {self.loss_train}\n- final validation loss: {self.loss_val}\n- final training hit-rate: {self.hit_rate_train}\n- final validation hit-rate: {self.hit_rate_val}"
@@ -1481,7 +1481,7 @@ class TransformerPredictor(NNPredictor):
                  rolling_window_size: int = 32,
                  forecast_horizon: int = 12,
                  validation_split: float = 0.2,
-                 randomise_validation: bool = True,
+                 randomise_validation_data_every: int = 10,
                  batch_size: int = 32,
                  forecast_step_loss_weight_range: [float, float] = (1, 0.7),  # eval parameter
                  use_mps_if_available: bool = False,  # training parameter
@@ -1509,7 +1509,7 @@ class TransformerPredictor(NNPredictor):
         super().__init__(price_csv_path=price_csv_path, date_column=date_column,
                          price_column=price_column, rolling_window_size=rolling_window_size,
                          forecast_horizon=forecast_horizon, sampling_rate_minutes=sampling_rate_minutes,
-                         validation_split=validation_split, randomise_validation=randomise_validation,
+                         validation_split=validation_split, randomise_validation_data_every=randomise_validation_data_every,
                          daily_prediction_hour=daily_prediction_hour,
                          predict_before_daily_prediction_hour=predict_before_daily_prediction_hour,
                          batch_size=batch_size, forecast_step_loss_weight_range=forecast_step_loss_weight_range,
@@ -1557,7 +1557,7 @@ class TransformerPredictor(NNPredictor):
 
     def describe(self):
         intro_str = "------------------- TransformerPredictor Instance -------------------\n\n"
-        data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /14} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- randomise validation: {self.randomise_validation}\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
+        data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /14} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- randomise validation data every: {self.randomise_validation_data_every}th epoch\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
         model_str = f"Model Attributes:\n- hidden transformer layer size: {self.hidden_transformer_layer_size}\n- number of transformer layers: {self.n_transformer_layers}\n- number of transformer heads: {self.n_transformer_heads}\n- use learnable start token: {self.use_start_token}\n\n"
         if self.n_train_epochs is not None:
             training_str = f"Training Attributes:\n- final training loss: {self.loss_train}\n- final validation loss: {self.loss_val}\n- final training hit-rate: {self.hit_rate_train}\n- final validation hit-rate: {self.hit_rate_val}"
