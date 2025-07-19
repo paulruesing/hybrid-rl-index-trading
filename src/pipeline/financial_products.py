@@ -77,6 +77,7 @@ class KOCertificate:
                                                                              pd.Series) else pd.Series(
             underlying_price_series.iloc[:, 0])
         self._underlying_price_series.index = pd.to_datetime(underlying_price_series.index)
+        self._underlying_price_series.drop_duplicates(inplace=True)  # remove duplicates upon import
 
         # if provided, overwrite all parameters through web scrape:
         if isin is not None and scrape_data_if_possible:

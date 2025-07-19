@@ -458,17 +458,19 @@ def get_data_from_alphavantage(api_key: str,
             ts.get_intraday(ticker, extended_hours=False, interval=sampling_rate, month=year_month, outputsize="full")[
                 0]
 
+            temp_price_frame.reset_index(inplace=True)
             # eventually adjust for foreign time-zone:
             temp_price_frame['date'] = pd.to_datetime(temp_price_frame['date'])
             if time_increment is not None: temp_price_frame['date'] + pd.Timedelta(time_increment)
             if time_decrement is not None: temp_price_frame['date'] - pd.Timedelta(time_decrement)
-
+            temp_price_frame.set_index('date', inplace=True)
             price_frame = pd.concat([price_frame, temp_price_frame])
         except ValueError as err:  # occurs if capacity for free queries is exhausted
             print(err)
     # sort the data according to datetimes and remove duplicates:
     price_frame.sort_index(inplace=True)
-    price_frame.drop_duplicates(inplace=True)
+    #price_frame.drop_duplicates(inplace=True)
+    price_frame = price_frame[~price_frame.index.duplicated(keep='first')]  # drop duplicate indices
 
     # save data:
     if save_path is not None:

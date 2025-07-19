@@ -86,12 +86,12 @@ class RLTradingEnv(gym.Env):
             Forecast days to scale expected return potential to. Only relevant for info statements.
         """
         super(RLTradingEnv, self).__init__()  # initialise base class
-        self.price_series = preprocessing.read_price_csv(csv_path=price_csv_path, date_column=date_column,
-                                                         price_column=price_column)
 
+        self._price_csv_path = price_csv_path
+        self._price_column = price_column
+        self._date_column = date_column
+        self._price_series = None  # placeholder for property
         self.price_sampling_rate_minutes = price_sampling_rate_minutes
-        self.price_column = price_column
-        self.date_column = date_column
 
         self.starting_cash = starting_cash
         self.commission_rate = commission_rate
@@ -200,20 +200,12 @@ class RLTradingEnv(gym.Env):
         obs = self.current_observation
         # todo: if tendencies included in observations, include such here
 
-        # derive average scaled predicted potential:
-        potential_list = np.array([])
-        for type, horizon_minutes, potential in zip(self.observation_types, self.observation_horizons_minutes, obs):
-            if type != 'potential': continue
-            potential = potential / horizon_minutes * self.potential_horizon_days * 24 * 60  # # scale per minute and then to per self.potential_horizon_days days
-            potential_list = np.append(potential_list, [potential])
-        avg_potential = np.nanmean(potential_list).item()
-
         # construct info dictionary:
         info = {'Step': self.current_step,
                 'Time': self.current_step_timestamp.strftime('%Y-%m-%d %H:%M:%S'),
                 'Reward': round(reward.item(), 2) if (reward is not np.nan) and (reward != 0) else 0,
                 'Action': self.action_enum_dict[action],
-                f'Avg. Expected Potential / {self.potential_horizon_days}d': avg_potential,
+                f'Avg. Expected Potential / {self.potential_horizon_days}d': self.current_average_predicted_potential,
                 'Cash': round(self.cash, 2).item() if isinstance(round(self.cash, 2), np.float64) else round(self.cash,
                                                                                                              2),
                 'Total': round(self.current_balance, 2).item() if isinstance(round(self.current_balance, 2),
@@ -509,6 +501,57 @@ class RLTradingEnv(gym.Env):
 
     ################ Observation Properties ################
     @property
+    def current_average_predicted_potential(self):
+        """ Current average predicted potential for next potential_horizon_days (part of current_observation). """
+        potential_list = np.array([])
+        for type, horizon_minutes, potential in zip(self.observation_types, self.observation_horizons_minutes, self.current_observation):
+            if type != 'potential': continue
+            potential = potential / horizon_minutes * self.potential_horizon_days * 24 * 60  # # scale per minute and then to per self.potential_horizon_days days
+            potential_list = np.append(potential_list, [potential])
+        return np.nanmean(potential_list).item()
+
+    @property
+    def price_series(self):
+        """ Underlying price series for observations and reward calculations. """
+        if self._price_series is None:
+            self._price_series = preprocessing.read_price_csv(csv_path=self.price_csv_path, date_column=self.date_column,
+                                                                price_column=self.price_column)
+        return self._price_series
+
+    @property
+    def price_csv_path(self):
+        """ File path of csv file containing price series. """
+        return self._price_csv_path
+
+    @price_csv_path.setter
+    def price_csv_path(self, value):
+        """ Changing value redownloads price series. """
+        self._price_csv_path = value
+        self._price_series = None
+
+    @property
+    def date_column(self) -> str:
+        """ date column of csv file containing price series. """
+        return self._date_column
+
+    @date_column.setter
+    def date_column(self, value):
+        """ Changing value redownloads price series. """
+        self._date_column = value
+        self._price_series = None
+
+    @property
+    def price_column(self) -> str:
+        """ price column of csv file containing price series. """
+        return self._price_column
+
+    @price_column.setter
+    def price_column(self, value):
+        """ Changing value redownloads price series. """
+        self._price_column = value
+        self._price_series = None
+
+    @property
     def observation_horizons_minutes(self) -> [int]:
         """ The forecast horizon in minutes of each observation of type 'potential' or 'tendency'. Is None for other types. """
         predictor_horizons = [predictor.forecast_horizon * predictor.sampling_rate_minutes for predictor in self.predictor_instances]
@@ -598,7 +641,7 @@ class RLTradingEnv(gym.Env):
                          agent: Union[MultiProductAgent, DQN],
                          mute_environment: bool = True,
                          reset_environment: bool = True,
-                         track_portfolio_exposure_every: int = 10,
+                         track_portfolio_exposure_every: int = 15,
                          save_log_directory: str = None,
                          plot_results: bool = True,
                          **plot_kwargs
