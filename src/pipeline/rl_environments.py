@@ -5,8 +5,8 @@ from src.utils import file_management as filemgmt
 from src.pipeline.rl_agents import MultiProductAgent
 
 from itertools import product
-import gym
-from gym import spaces
+import gymnasium as gym
+from gymnasium import spaces
 from stable_baselines3 import DQN
 from typing import Union, Literal
 import numpy as np
@@ -126,7 +126,7 @@ class RLTradingEnv(gym.Env):
         self.observation_space = spaces.Box(low=-np.inf,
                                             high=np.inf,
                                             shape=(len(predictor_instances) + 2,),
-                                            dtype=np.float16)
+                                            dtype=np.float64)
         # contains floats of each predictor's output and two more for current cash and holding
 
         # possible range of rewards for actions:
@@ -163,6 +163,8 @@ class RLTradingEnv(gym.Env):
             Reward from the action taken, equal to change in portfolio value.
         done : bool
             Whether the current episode is finished.
+        truncated : bool
+            Whether the current episode was truncated.
         info : dict
             Additional diagnostic information for debugging and logging.
         """
@@ -217,7 +219,7 @@ class RLTradingEnv(gym.Env):
 
         # if done: self.reset()  # happens automatically!
         # current observation property constructs observation space
-        return obs, reward, done, info
+        return obs, reward, done, False, info  # gymnasium returns terminated, truncated check
 
     def take_action(self, action: int):
         """
@@ -329,21 +331,25 @@ class RLTradingEnv(gym.Env):
         """
         return (self.current_episode + 1) % self.total_episodes
 
-    def reset(self):
+    def reset(self, seed: int = None) -> (np.ndarray, dict):
         """
         Reset the environment to the initial state at the start of an episode.
+
+        seed is placeholder currently for stable_baselines3
 
         Returns
         -------
         np.ndarray
             Initial observation after reset, including predictors' outputs, cash, and holdings.
+        dict
+            Info dict of reset action.
         """
         self.init_start_step()
         if self.verbose:  # info statement
             print(f"Starting episode {self.current_episode + 1}", (f"/ {self.total_episodes}"))
         self.cash = self.starting_cash
         self.shares_per_product.iloc[:] = 0
-        return self.current_observation
+        return self.current_observation, {'Status': 'Starting new episode'}  # info dict
 
     def get_current_predictor_input(self, predictor: LSTMPredictor) -> np.ndarray:
         """
@@ -647,17 +653,17 @@ class RLTradingEnv(gym.Env):
                          **plot_kwargs
                          ):
         """ Simulate agent behavior in environment. """
-        if reset_environment: obs = self.reset()  # reset episode and fetch first observation
+        if reset_environment: obs, _ = self.reset()  # reset episode and fetch first observation
         if mute_environment: self.verbose = False
 
         # initialise log frame:
         log = pd.DataFrame()
         for ind in tqdm(range(self.current_step, self.total_steps)):
             action, _ = agent.predict(obs)  # infer action
-            obs, _, done, info = self.step(action, track_portfolio_exposure=(
+            obs, _, done, truncated, info = self.step(action, track_portfolio_exposure=(
                         ind % track_portfolio_exposure_every == 0))  # retrieve new observation and info
 
-            if done: break  # check whether episode is finished
+            if done or truncated: break  # check whether episode is finished
             log = pd.concat([log, pd.DataFrame(info, index=[info['Step']])])  # log info
 
         # compute benchmark:
