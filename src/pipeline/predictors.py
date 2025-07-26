@@ -1148,8 +1148,9 @@ class NNPredictor:
                 scheduler.step()
 
             # eventually randomise validation and training data:
-            if epoch % self.randomise_validation_data_every == 0:
-                self.split_data(verbose=False)  # verbose=False to prevent status messages in every epoch
+            if self.randomise_validation_data_every is not None:
+                if epoch % self.randomise_validation_data_every == 0:
+                    self.split_data(verbose=False)  # verbose=False to prevent status messages in every epoch
 
             loss_train_history.append(loss_train);
             loss_val_history.append(loss_val)
