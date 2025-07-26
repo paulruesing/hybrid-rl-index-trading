@@ -631,6 +631,9 @@ class LSTMModel(nn.Module):
 ######################### Predictor classes #########################
 class NNPredictor:
     def __init__(self,
+                 preset_type: Literal['a1', 'a2', 'b1', 'b2', 'c1', 'c2', 'd1', 'd2'] = None,
+                 # allows for automatic inference of sampling_rate_minutes, daily_prediction_hour,
+                 # predict_before_daily_prediction_hour, rolling_window_size and forecast_horizon
                  sampling_rate_minutes: int = 15,  # data import parameters
                  price_csv_path: str = None,
                  price_column: str = 'close',
@@ -658,14 +661,26 @@ class NNPredictor:
                  verbose: bool = False):
         ### provided parameters:
         # data preparation:
-        self._sampling_rate_minutes = sampling_rate_minutes
+        if preset_type is None:
+            self._sampling_rate_minutes = sampling_rate_minutes
+            self._daily_prediction_hour = daily_prediction_hour
+            self._predict_before_daily_prediction_hour = predict_before_daily_prediction_hour
+            self._rolling_window_size = rolling_window_size
+            self._forecast_horizon = forecast_horizon
+        else:
+            preset_type_dict = {'a1': (15, 13, False, 20, 12), # 15 minutes sampling
+                                'b1': (60, 16, True, 42, 14),  # 1 hour sampling
+                                'b2': (60, 16, True, 70, 14),
+                                'c1': (60*14, 16, True, 15, 3),  # 1 day sampling
+                                'c2': (60*14, 16, True, 40, 5),
+                                'd1': (60*14*7, 16, True, 24, 3),  # 1 week sampling
+                                'd2': (60*14*7, 16, True, 48, 6),}
+            self._sampling_rate_minutes, self._daily_prediction_hour, self._predict_before_daily_prediction_hour, self._rolling_window_size, self._forecast_horizon = preset_type_dict[preset_type]
+
+
         self._price_csv_path = price_csv_path
         self._date_column = date_column
         self._price_column = price_column
-        self._daily_prediction_hour = daily_prediction_hour
-        self._predict_before_daily_prediction_hour = predict_before_daily_prediction_hour
-        self._rolling_window_size = rolling_window_size
-        self._forecast_horizon = forecast_horizon
         self._validation_split = validation_split
         self.randomise_validation_data_every = randomise_validation_data_every
         self._batch_size = batch_size
@@ -703,7 +718,7 @@ class NNPredictor:
         ### status messages:
         if price_csv_path is None and verbose: print(
             'No price file provided yet. Define price_csv_path to trigger data import.')
-        if daily_prediction_hour is None and verbose: print(
+        if daily_prediction_hour is None and preset_type is None and verbose: print(
             'No daily prediction hour defined yet, hence currently predictions are carried out at every time step. Define daily_prediction_hour to change this.')
 
     ### data import properties:
@@ -1256,6 +1271,9 @@ class LSTMPredictor(NNPredictor):
     """ LSTM based stock price predictor framework. """
     def __init__(self,
                  # base class parameters:
+                 preset_type: Literal['a1', 'a2', 'b1', 'b2', 'c1', 'c2', 'd1', 'd2'] = None,
+                 # allows for automatic inference of sampling_rate_minutes, daily_prediction_hour,
+                 # predict_before_daily_prediction_hour, rolling_window_size and forecast_horizon
                  sampling_rate_minutes: int = 15,  # data import parameters
                  price_csv_path: str = None,
                  price_column: str = 'close',
@@ -1290,7 +1308,8 @@ class LSTMPredictor(NNPredictor):
                  evaluate_hit_rate_upon_training=True,  # can save run-time especially for short training procedures
                  ):
         super().__init__(price_csv_path=price_csv_path, date_column=date_column,
-                         price_column=price_column, rolling_window_size=rolling_window_size,
+                         price_column=price_column,
+                         preset_type=preset_type, rolling_window_size=rolling_window_size,
                          forecast_horizon=forecast_horizon, sampling_rate_minutes=sampling_rate_minutes,
                          validation_split=validation_split, randomise_validation_data_every=randomise_validation_data_every,
                          daily_prediction_hour=daily_prediction_hour,
@@ -1473,6 +1492,9 @@ class TransformerPredictor(NNPredictor):
     """ Transformer-based stock price predictor framework. """
     def __init__(self,
                  # base class parameters:
+                 preset_type: Literal['a1', 'a2', 'b1', 'b2', 'c1', 'c2', 'd1', 'd2'] = None,
+                 # allows for automatic inference of sampling_rate_minutes, daily_prediction_hour,
+                 # predict_before_daily_prediction_hour, rolling_window_size and forecast_horizon
                  sampling_rate_minutes: int = 15,  # data import parameters
                  price_csv_path: str = None,
                  price_column: str = 'close',
@@ -1508,7 +1530,8 @@ class TransformerPredictor(NNPredictor):
                  evaluate_hit_rate_upon_training=True,  # can save run-time especially for short trainig procedures
                  ):
         super().__init__(price_csv_path=price_csv_path, date_column=date_column,
-                         price_column=price_column, rolling_window_size=rolling_window_size,
+                         price_column=price_column,
+                         preset_type=preset_type, rolling_window_size=rolling_window_size,
                          forecast_horizon=forecast_horizon, sampling_rate_minutes=sampling_rate_minutes,
                          validation_split=validation_split, randomise_validation_data_every=randomise_validation_data_every,
                          daily_prediction_hour=daily_prediction_hour,
