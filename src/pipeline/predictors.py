@@ -631,7 +631,7 @@ class LSTMModel(nn.Module):
 ######################### Predictor classes #########################
 class NNPredictor:
     def __init__(self,
-                 preset_type: Literal['a1', 'a2', 'b1', 'b2', 'c1', 'c2', 'd1', 'd2'] = None,
+                 preset_type: Literal['a1', 'b1', 'b2', 'c1', 'c2', 'd1', 'd2', 'd3'] = None,
                  # allows for automatic inference of sampling_rate_minutes, daily_prediction_hour,
                  # predict_before_daily_prediction_hour, rolling_window_size and forecast_horizon
                  sampling_rate_minutes: int = 15,  # data import parameters
@@ -668,13 +668,23 @@ class NNPredictor:
             self._rolling_window_size = rolling_window_size
             self._forecast_horizon = forecast_horizon
         else:
-            preset_type_dict = {'a1': (15, 13, False, 20, 12), # 15 minutes sampling
-                                'b1': (60, 16, True, 42, 14),  # 1 hour sampling
-                                'b2': (60, 16, True, 70, 14),
-                                'c1': (60*14, 16, True, 15, 3),  # 1 day sampling
-                                'c2': (60*14, 16, True, 40, 5),
-                                'd1': (60*14*7, 16, True, 24, 3),  # 1 week sampling
-                                'd2': (60*14*7, 16, True, 48, 6),}
+            preset_type_dict = {
+                # 15 minutes sampling
+                'a1': (15, 13, False, 20, 12),
+
+                # 1 hour sampling:
+                'b1': (60, 16, True, 42, 14),
+                'b2': (60, 16, True, 70, 14),
+
+                # 1 day sampling
+                'c1': (60 * 14, 16, True, 15, 3),
+                'c2': (60 * 14, 16, True, 40, 5),
+
+                # 1 week sampling:
+                'd1': (60 * 14 * 7, 16, True, 4 * 4, 3),
+                'd2': (60 * 14 * 7, 16, True, 6 * 4, 3),
+                'd3': (60 * 14 * 7, 16, True, 48, 6),
+            }
             self._sampling_rate_minutes, self._daily_prediction_hour, self._predict_before_daily_prediction_hour, self._rolling_window_size, self._forecast_horizon = preset_type_dict[preset_type]
 
 
@@ -925,8 +935,7 @@ class NNPredictor:
 
     @n_train_epochs.setter
     def n_train_epochs(self, value):
-        self._n_train_epochs = value;
-        self.run_training()
+        self._n_train_epochs = value; self.run_training()
 
     @property
     def lr_scheduler(self):
@@ -1271,7 +1280,7 @@ class LSTMPredictor(NNPredictor):
     """ LSTM based stock price predictor framework. """
     def __init__(self,
                  # base class parameters:
-                 preset_type: Literal['a1', 'a2', 'b1', 'b2', 'c1', 'c2', 'd1', 'd2'] = None,
+                 preset_type: Literal['a1', 'b1', 'b2', 'c1', 'c2', 'd1', 'd2', 'd3'] = None,
                  # allows for automatic inference of sampling_rate_minutes, daily_prediction_hour,
                  # predict_before_daily_prediction_hour, rolling_window_size and forecast_horizon
                  sampling_rate_minutes: int = 15,  # data import parameters
@@ -1492,7 +1501,7 @@ class TransformerPredictor(NNPredictor):
     """ Transformer-based stock price predictor framework. """
     def __init__(self,
                  # base class parameters:
-                 preset_type: Literal['a1', 'a2', 'b1', 'b2', 'c1', 'c2', 'd1', 'd2'] = None,
+                 preset_type: Literal['a1', 'b1', 'b2', 'c1', 'c2', 'd1', 'd2', 'd3'] = None,
                  # allows for automatic inference of sampling_rate_minutes, daily_prediction_hour,
                  # predict_before_daily_prediction_hour, rolling_window_size and forecast_horizon
                  sampling_rate_minutes: int = 15,  # data import parameters
@@ -1720,6 +1729,7 @@ def predictor_parametrisation_loop(predictor_class: NNPredictor,
                                    n_train_epochs: int = 50,
                                    early_stopping_patience: int = 15,
                                    sort_metric: Literal['Train Loss', 'Val Loss', 'Train HR', 'Val HR'] = None,
+                                   print_progress: bool = True,
                                    **param_grid_and_constants):
     """
     Hyperparameter search loop for a NNPredictor-type class. Provide class, not an instance!
@@ -1744,7 +1754,10 @@ def predictor_parametrisation_loop(predictor_class: NNPredictor,
     result_array = []  # initialise result array
 
     # all possible ordered pairs of grid parameters:
-    for config in product(*grid_params.values()):
+    n_configs = len(list(product(*grid_params.values())))
+    for config_ind, config in enumerate(product(*grid_params.values())):
+        if print_progress: print(f"--------- Training Config {config_ind} / {n_configs} ---------")
+
         params = dict(zip(grid_params.keys(), config))
         model_kwargs = {
             **params,
