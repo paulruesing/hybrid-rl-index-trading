@@ -1756,7 +1756,7 @@ def predictor_parametrisation_loop(predictor_class: NNPredictor,
     # all possible ordered pairs of grid parameters:
     n_configs = len(list(product(*grid_params.values())))
     for config_ind, config in enumerate(product(*grid_params.values())):
-        if print_progress: print(f"--------- Training Config {config_ind} / {n_configs} ---------")
+        if print_progress: print(f"--------- Training Config {config_ind+1} / {n_configs} ---------")
 
         params = dict(zip(grid_params.keys(), config))
         model_kwargs = {
