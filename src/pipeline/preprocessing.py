@@ -243,7 +243,7 @@ def create_rolling_window_view(input_series: pd.Series,
 
         # status message and sanity check:
         if len(X) > 0:
-            print(f"Resulting dataset consists of {len(X)} observations.")
+            if verbose: print(f"Resulting dataset consists of {len(X)} observations.")
         else:
             raise ValueError(f"No observations remain after choosing observations according to prediction hour of {daily_prediction_hour}.\nThis can be due to wrong specification of the sampling rate (currently {sampling_rate_minutes} min)!")
 
