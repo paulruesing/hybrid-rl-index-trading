@@ -721,6 +721,9 @@ class RLTradingEnv(gym.Env):
             sell_short_signals = np.where((potentials > scaled_thresholds[1]) & (potentials < scaled_thresholds[3]),
                                           potentials, np.nan)
             potential_ax.plot(dates, sell_short_signals, color='lightgreen', label='Sell Short Signal')
+            hold_signals = np.where((potentials > scaled_thresholds[0]) & (potentials < scaled_thresholds[1]),
+                                          potentials, np.nan)
+            potential_ax.plot(dates, hold_signals, color='grey', label='Hold Signal')
             sell_long_signals = np.where((potentials > scaled_thresholds[2]) & (potentials < scaled_thresholds[0]),
                                          potentials, np.nan)
             potential_ax.plot(dates, sell_long_signals, color='lightcoral', label='Sell Long Signal')
