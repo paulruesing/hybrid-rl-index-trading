@@ -29,6 +29,7 @@ class RLTradingEnv(gym.Env):
                  price_column='close',
                  date_column='date',
                  predictor_instances: [LSTMPredictor] = None,  # to be imported for data preparation
+                 precalculate_predictor_observations: bool = True,
                  product_set: KOCertificateSet = None,
                  leverage_categories: [float] = (1.0, 2.0, 3.0, 4.0, 5.0),  # used to create action space
                  include_open_leverage_category: bool = False,  # if True, larger than last entry is highest category
@@ -63,6 +64,8 @@ class RLTradingEnv(gym.Env):
             Column name in the CSV representing the timestamp.
         predictor_instances : list of LSTMPredictor
             Predictors used to generate potential signals.
+        precalculate_predictor_observations : bool, default True
+            If true, calculates all potential estimates upon accessing first observation (run-time efficient for training).
         product_set : KOCertificateSet
             Set of financial products (e.g., long/short leverage instruments).
         leverage_categories : list of float, default (1.0, 2.0, 3.0, 4.0, 5.0)
@@ -118,7 +121,7 @@ class RLTradingEnv(gym.Env):
         self.action_space = spaces.Discrete(len(self.action_enum))  # is re-written within self.action_enum property
 
         # step dates (property to be calculated upon read-out)
-        self._step_dates_list = None
+        self._step_dates_list = self._step_timestamp_list = None
         self.current_step = 0;
         self.init_start_step()  # sets self.current_step to minimum value for predictors to be callable
 
@@ -127,7 +130,10 @@ class RLTradingEnv(gym.Env):
                                             high=np.inf,
                                             shape=(len(predictor_instances) + 2,),
                                             dtype=np.float64)
+        self._potential_estimates_dict = None
+        self.precalculate_predictor_observations = precalculate_predictor_observations
         # contains floats of each predictor's output and two more for current cash and holding
+
 
         # possible range of rewards for actions:
         self.reward_range = (-np.inf, np.inf)
@@ -207,7 +213,7 @@ class RLTradingEnv(gym.Env):
                 'Time': self.current_step_timestamp.strftime('%Y-%m-%d %H:%M:%S'),
                 'Reward': round(reward.item(), 2) if (reward is not np.nan) and (reward != 0) else 0,
                 'Action': self.action_enum_dict[action],
-                f'Avg. Expected Potential / {self.potential_horizon_days}d': self.current_average_predicted_potential,
+                f'Avg. Expected Potential / {self.potential_horizon_days}d': self.current_avg_scaled_predicted_potential,
                 'Cash': round(self.cash, 2).item() if isinstance(round(self.cash, 2), np.float64) else round(self.cash,
                                                                                                              2),
                 'Total': round(self.current_balance, 2).item() if isinstance(round(self.current_balance, 2),
@@ -351,7 +357,7 @@ class RLTradingEnv(gym.Env):
         self.shares_per_product.iloc[:] = 0
         return self.current_observation, {'Status': 'Starting new episode'}  # info dict
 
-    def get_current_predictor_input(self, predictor: LSTMPredictor) -> np.ndarray:
+    def get_predictor_input(self, predictor: LSTMPredictor, custom_timestamp: pd.Timestamp = None) -> pd.Series:
         """
         Retrieve the time series input for a given predictor at the current step.
 
@@ -361,6 +367,8 @@ class RLTradingEnv(gym.Env):
         ----------
         predictor : LSTMPredictor
             The predictor instance whose input format is to be generated.
+        custom_timestamp : int, optional
+            Custom timestamp compute predictor input for. If None, uses self.current_step_timestamp
 
         Returns
         -------
@@ -372,16 +380,20 @@ class RLTradingEnv(gym.Env):
         sampling_rate_minutes = predictor.sampling_rate_minutes
         predict_before_daily_prediction_hour = predictor.predict_before_daily_prediction_hour
 
+        # convert timestamp to datetime_int_index:
+        timestamp = self.current_step_timestamp if custom_timestamp is None else custom_timestamp
+        date_time_int_index = np.argwhere(self.price_series[:timestamp])[-1].item()  # last index = index of timestamp
+
         # calculate start int index for rolling window (if not predicting before daily prediction hour add 1 index:
         start_index = int(
-            self.current_step_int_index - rolling_window_size * sampling_rate_minutes / self.price_sampling_rate_minutes)
+            date_time_int_index - rolling_window_size * sampling_rate_minutes / self.price_sampling_rate_minutes)
 
         # sanity check:
         if start_index < 0: raise ValueError("Rolling window size too large for current step.")
 
         # slice according to start and end index (adjusted by +1 if prediction should be after prediction hour) and sampling rate:
         sampled_prices = self.price_series.iloc[
-                         start_index + (not predict_before_daily_prediction_hour):self.current_step_int_index + (
+                         start_index + (not predict_before_daily_prediction_hour):date_time_int_index + (
                              not predict_before_daily_prediction_hour):int(
                              sampling_rate_minutes / self.price_sampling_rate_minutes)]
 
@@ -398,7 +410,7 @@ class RLTradingEnv(gym.Env):
         while step_too_small:
             try:
                 # try to get predictor input:
-                _ = [self.get_current_predictor_input(predictor) for predictor in self.predictor_instances]
+                _ = [self.get_predictor_input(predictor) for predictor in self.predictor_instances]
                 step_too_small = False  # if successful, step is sufficient
             except ValueError:  # if current step too small for rolling window view, increase by 1
                 self.current_step += 1
@@ -489,7 +501,7 @@ class RLTradingEnv(gym.Env):
         return self._daily_prediction_hours
 
     @property
-    def step_dates_list(self):
+    def step_dates_list(self) -> [str]:
         """ Dates for each day in the price series at each distinct prediction hour. """
         if self._step_dates_list is None:
             grouped = self.price_series.groupby(
@@ -505,9 +517,41 @@ class RLTradingEnv(gym.Env):
                 self._step_dates_list = self.step_dates_list[:-(len(self.daily_prediction_hours))]
         return self._step_dates_list
 
+    @property
+    def step_timestamp_list(self) -> [pd.Timestamp]:
+        """ Timestamps for each day in the price series at each distinct prediction hour. Has nan values for spots without data. """
+        if self._step_timestamp_list is None:
+            temp_list = []
+            # iterate over all pred_hour step_dates combinations
+            for step_date, pred_hour in product(self.step_dates_list, self.daily_prediction_hours):
+                time_str = f"{step_date} {f'0{pred_hour}' if pred_hour < 10 else pred_hour}"
+                try:  # if no data is present for that timestamp-str
+                    temp_list.append(self.price_series[time_str].iloc[0:1].index.item())
+                except:  # nan for empty spots
+                    temp_list.append(None)
+            self._step_timestamp_list = temp_list
+        return self._step_timestamp_list
+
+    @property
+    def current_prediction_hour(self) -> int:
+        return list(self.daily_prediction_hours)[(self.current_step % len(self.daily_prediction_hours))]
+
+    @property
+    def current_step_date(self) -> str:
+        return self.step_dates_list[self.current_step]
+
+    @property
+    def current_step_timestamp(self) -> pd.Timestamp:
+        """ Return timestamp of current step's datetime. """
+        candidate = self.step_timestamp_list[self.current_step]
+        while candidate is None:  # timestamp list has None elements at timestamps where no data is present
+            self.current_step += 1
+            candidate = self.step_timestamp_list[self.current_step]
+        return candidate
+
     ################ Observation Properties ################
     @property
-    def current_average_predicted_potential(self):
+    def current_avg_scaled_predicted_potential(self):
         """ Current average predicted potential for next potential_horizon_days (part of current_observation). """
         potential_list = np.array([])
         for type, horizon_minutes, potential in zip(self.observation_types, self.observation_horizons_minutes, self.current_observation):
@@ -531,7 +575,7 @@ class RLTradingEnv(gym.Env):
 
     @price_csv_path.setter
     def price_csv_path(self, value):
-        """ Changing value redownloads price series. """
+        """ Changing value re-downloads price series. """
         self._price_csv_path = value
         self._price_series = None
 
@@ -542,7 +586,7 @@ class RLTradingEnv(gym.Env):
 
     @date_column.setter
     def date_column(self, value):
-        """ Changing value redownloads price series. """
+        """ Changing value re-downloads price series. """
         self._date_column = value
         self._price_series = None
 
@@ -553,7 +597,7 @@ class RLTradingEnv(gym.Env):
 
     @price_column.setter
     def price_column(self, value):
-        """ Changing value redownloads price series. """
+        """ Changing value re-downloads price series. """
         self._price_column = value
         self._price_series = None
 
@@ -573,17 +617,48 @@ class RLTradingEnv(gym.Env):
         other = ['cash', 'holding']
         return predictor_types + other
 
+    def compute_predicted_potentials(self, custom_timestamp: pd.Timestamp = None) -> np.ndarray:
+        """ Computes predicted potentials for all predictors for custom_timestamp (if provided) or current time. """
+        potential_array = np.array([])
+        for predictor in self.predictor_instances:
+            try:
+                predictor_input = self.get_predictor_input(predictor, custom_timestamp=custom_timestamp)
+            except ValueError:
+                continue  # happens if step is too low for rolling window
+            prices, _ = predictor.predict(predictor_input)
+            potential = (prices[-1] / predictor_input.iloc[
+                -1] - 1).item()  # relative expected change at end of forecast horizon
+            potential_array = np.append(potential_array, [potential])
+        return potential_array
+
+    @property
+    def potential_estimates_dict(self) -> {str: np.ndarray}:
+        """ Potential estimates array (one entry per predictor) with timestamp-keys (prediction times)."""
+        if self._potential_estimates_dict is None:
+            self._potential_estimates_dict = {}
+            # precalculate potential estimates:
+            print("Pre-calculating potential estimates for all timestamps and predictors...")
+            for ind, timestamp in enumerate(tqdm(self.step_timestamp_list)):
+                if timestamp is None: continue  # empty elements means no data for that date - skip
+                # compute predicted potentials based on all predictors:
+                self._potential_estimates_dict[timestamp] = self.compute_predicted_potentials(custom_timestamp=timestamp)
+
+        return self._potential_estimates_dict
+
+    @property
+    def current_potential_estimates(self) -> np.ndarray:
+        """ Returns potential estimates (relative expected return for next self.potential_horizon_days) per predictor. """
+        if self.precalculate_predictor_observations:
+            return self.potential_estimates_dict[self.current_step_timestamp]
+        else:
+            return self.compute_predicted_potentials()
+
     @property
     def current_observation(self):
         """ Construct and return current observable status. Includes predictors output, cash and holding. """
         observation = np.array([], dtype=np.int64)
-        for predictor in self.predictor_instances:
-            # include each predictor's predicted potential:
-            input = self.get_current_predictor_input(predictor)
-            prices, _ = predictor.predict(input)
-            potential = (prices[-1] / input.iloc[-1] - 1).item()  # relative expected change at end of forecast horizon
-            observation = np.append(observation, [potential])
-
+        # add potential estimates:
+        observation = np.append(observation, self.current_potential_estimates)
         # include cash and current holding:
         return np.append(observation, [self.cash, self.current_holding])
 
@@ -591,30 +666,6 @@ class RLTradingEnv(gym.Env):
     def current_prices_per_product(self) -> pd.Series:
         """ Close prices of each product at the current step's time. """
         return self.product_set.price_frame.loc[self.current_step_timestamp, :]
-
-    @property
-    def current_prediction_hour(self):
-        return list(self.daily_prediction_hours)[(self.current_step % len(self.daily_prediction_hours))]
-
-    @property
-    def current_step_date(self):
-        return self.step_dates_list[self.current_step]
-
-    @property
-    def current_step_timestamp(self) -> pd.Timestamp:
-        """ Return timestamp of current step's datetime. """
-        try:
-            return self.price_series[
-                       f"{self.current_step_date} {f'0{self.current_prediction_hour}' if self.current_prediction_hour < 10 else self.current_prediction_hour}"].iloc[
-                   0:1].index.item()
-        except KeyError:  # recursion with next step if IndexError (because then no data present for that prediction hour or day)
-            self.current_step += 1
-            return self.current_step_timestamp
-
-    @property
-    def current_step_int_index(self) -> int:
-        return np.argwhere(self.price_series[:self.current_step_timestamp])[
-            -1].item()  # last index = index of current_step_timestamp
 
     @property
     def current_balance(self) -> float:
@@ -646,59 +697,147 @@ class RLTradingEnv(gym.Env):
     def run_env_backtest(self,
                          agent: Union[MultiProductAgent, DQN],
                          mute_environment: bool = True,
+                         print_statistics: bool = True,
                          reset_environment: bool = True,
                          track_portfolio_exposure_every: int = 15,
                          save_log_directory: str = None,
                          plot_results: bool = True,
+                         performance_time_unit: Literal['p.a.', 'p.m.'] = 'p.m.',
                          **plot_kwargs
-                         ):
-        """ Simulate agent behavior in environment. """
+                         ) -> (pd.Series, pd.Series):
+        """
+        Simulate agent behavior in environment.
+        Returns tuple with policy_performance and benchmark_performance as pd.Series normalised across performance_time_unit.
+        """
         if reset_environment: obs, _ = self.reset()  # reset episode and fetch first observation
+        else: obs = self.current_observation  # or fetch current observation
+
         if mute_environment: self.verbose = False
 
-        # initialise log frame:
-        log = pd.DataFrame()
+        ### iterate through all steps of environment:
+        log = pd.DataFrame()  # initialise log frame
         for ind in tqdm(range(self.current_step, self.total_steps)):
             action, _ = agent.predict(obs)  # infer action
+            if isinstance(action, np.ndarray): action = action.item()  # stable_baselines DQN returns np.array
+
             obs, _, done, truncated, info = self.step(action, track_portfolio_exposure=(
                         ind % track_portfolio_exposure_every == 0))  # retrieve new observation and info
 
             if done or truncated: break  # check whether episode is finished
             log = pd.concat([log, pd.DataFrame(info, index=[info['Step']])])  # log info
 
-        # compute benchmark:
+        # datetime-index for column concatenation and coherent structure:
+        log['Time'] = pd.to_datetime(log['Time'])
+        log.set_index('Time', inplace=True)
+        log['Time'] = log.index  # include index also as column for e.g. groupby
+
+        ### compute benchmark:
         benchmark = self.starting_cash / self.price_series.loc[log['Time'].iloc[0]] * self.price_series.loc[
             log['Time']]  # construct benchmark return if HODL
-        log.set_index('Time', inplace=True)
         log['Benchmark'] = benchmark
+
+        ### annualized / monthly performance:
+        # compute time-window normalized returns:
+        if performance_time_unit != 'p.a.' and performance_time_unit != 'p.m.':
+            raise ValueError("performance_time_unit must be 'p.a.' or 'p.m.'!")
+        grouped_frame = log.loc[:, ['Total', 'Benchmark', 'Time']].groupby(
+            log.index.year if performance_time_unit == 'p.a.' else [log.index.year, log.index.month]).agg(
+            ['first', 'last'])
+        normalised_benchmark_return_series = ((
+                                                      (grouped_frame['Benchmark', 'last'] - grouped_frame[
+                                                          'Benchmark', 'first'])  # increase
+                                                      / grouped_frame['Benchmark', 'first']  # relative return
+                                              ) * (
+                                                      (grouped_frame['Time', 'last'] - grouped_frame[
+                                                          'Time', 'first']).max()  # regular time duration
+                                                      / (grouped_frame['Time', 'last'] - grouped_frame['Time', 'first'])
+                                                  # actual time duration
+                                              ))
+        normalised_policy_return_series = ((
+                                                   (grouped_frame['Total', 'last'] - grouped_frame[
+                                                       'Total', 'first'])  # increase
+                                                   / grouped_frame['Total', 'first']  # relative return
+                                           ) * (
+                                                   (grouped_frame['Time', 'last'] - grouped_frame[
+                                                       'Time', 'first']).max()  # regular time duration
+                                                   / (grouped_frame['Time', 'last'] - grouped_frame['Time', 'first'])
+                                               # actual time duration
+                                           ))
+        # remove multi index and set time-index
+        normalised_benchmark_return_series.index = grouped_frame['Time', 'first']
+        normalised_policy_return_series.index = grouped_frame['Time', 'first']
 
         if save_log_directory:  # eventually save model
             log.to_csv(save_log_directory / filemgmt.file_title("Environment Backtest Log", dtype_suffix='.csv'))
 
+        # print summary statistics:
+        if print_statistics:
+            print(f"--------- Policy {performance_time_unit} Performance Statistics ---------")
+            # compute alpha:
+            normalised_alpha_series = normalised_policy_return_series - normalised_benchmark_return_series
+            # policy statistics:
+            print(f"Policy: \tMedian {normalised_policy_return_series.median()}\tMean {normalised_policy_return_series.mean()}\tStd.Dev. {normalised_policy_return_series.std()}")
+            print(f"\t\t\tMax. {normalised_policy_return_series.max()}\tMin. {normalised_policy_return_series.min()}")
+            # alpha statistics:
+            print(f"Alpha: \tMedian {normalised_alpha_series.median()}\tMean {normalised_alpha_series.mean()}\tStd.Dev. {normalised_alpha_series.std()}")
+            print(f"\t\t\tMax. {normalised_alpha_series.max()}\tMin. {normalised_alpha_series.min()}")
+            overperform_mask = (normalised_alpha_series > 0)
+            print(f"Over-performed {overperform_mask.value_counts()[True]} / {len(overperform_mask)} epochs")
+
         if plot_results:
-            self.plot_backtest_results(log, agent=agent, **plot_kwargs)
+            self.plot_backtest_results(log_df=log, policy_return_series=normalised_policy_return_series,
+                                       benchmark_return_series=normalised_benchmark_return_series,
+                                       performance_time_unit=performance_time_unit,
+                                       agent=agent,
+                                       **plot_kwargs)
+
+
+        return normalised_policy_return_series, normalised_benchmark_return_series
 
     def plot_backtest_results(self, log_df: pd.DataFrame,
+                              policy_return_series: pd.Series = None,
+                              benchmark_return_series: pd.Series = None,
+                              performance_time_unit: Literal['p.a.', 'p.m.'] = 'p.a.',
                               agent: Union[MultiProductAgent, DQN] = None,
-                              save_fig_directory: str = None, ):
-        """ Visualize backtest results. """
-        val_df = log_df.loc[:,
-                 [f'Avg. Expected Potential / {self.potential_horizon_days}d', 'Total Exposure', 'Cash', 'Total']]
-        val_df['Policy'] = log_df['Total'] / log_df['Benchmark'].iloc[0]
-        val_df['Benchmark'] = log_df['Benchmark'] / log_df['Benchmark'].iloc[0]
+                              save_fig_directory: str = None):
+        """
+        Visualize backtest results.
 
-        fig, (return_ax, exposure_ax, cash_ax) = plt.subplots(3, 1, figsize=(16, 13))
+        Include monthly or annual returns as policy_return_series to include time-normalized return plot.
+        """
+        # prepare axes:
+        if policy_return_series is not None:
+            fig, (return_ax, performance_ax, exposure_ax, cash_ax) = plt.subplots(4, 1, figsize=(16, 13))
+        else:
+            fig, (return_ax, exposure_ax, cash_ax) = plt.subplots(3, 1, figsize=(16, 13))
         potential_ax = exposure_ax.twinx()
         dates = pd.to_datetime(log_df.index)
 
         # portfolio performance:
-        return_ax.plot(dates, val_df['Policy'], color='orange', label='Policy')
-        return_ax.plot(dates, val_df['Benchmark'], color='blue', label='Benchmark')
-        return_ax.set_title('Normalized Policy vs. Benchmark')
+        val_df = log_df.loc[:,
+                 [f'Avg. Expected Potential / {self.potential_horizon_days}d', 'Total Exposure', 'Cash', 'Total']]
+        normalized_policy_portfolio_value = log_df['Total'] / log_df['Benchmark'].iloc[0]
+        normalized_benchmark_portfolio_value = log_df['Benchmark'] / log_df['Benchmark'].iloc[0]
+        return_ax.plot(dates, normalized_policy_portfolio_value, color='orange', label='Policy')
+        return_ax.plot(dates, normalized_benchmark_portfolio_value, color='blue', label='Benchmark')
+        return_ax.set_title('Normalized Policy vs. Benchmark Portfolio Value')
         return_ax.set_xlabel('Date')
         return_ax.set_ylabel('Normalized Balance')
         return_ax.legend()
         return_ax.grid(True)
+
+        # relative (time-normalised) performance plot:
+        if policy_return_series is not None:
+            performance_ax.plot(policy_return_series * 100, marker='o', color='orange', label='Policy')
+            if benchmark_return_series is not None:
+                alpha_series = policy_return_series - benchmark_return_series
+                performance_ax.plot(benchmark_return_series * 100, marker='o', color='blue', label='Benchmark')
+                performance_ax.plot(alpha_series * 100, marker='o', color='green', label='Alpha')
+                performance_ax.axhline(y=0, color='black')
+            performance_ax.set_xlabel('Datetime');
+            performance_ax.set_ylabel(f"Return {performance_time_unit} [%]")
+            performance_ax.legend(loc='upper left')
+            performance_ax.grid()
 
         # include potential thresholds:
         potentials = val_df[f'Avg. Expected Potential / {self.potential_horizon_days}d'] * 100
