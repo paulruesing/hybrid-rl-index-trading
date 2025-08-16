@@ -22,18 +22,21 @@ def file_title(title: str, dtype_suffix=".svg", short=False):
     else:
         return datetime.now().strftime('%Y-%m-%d %H_%M_%S') + " " + title + dtype_suffix
 
-def most_recent_file(directory: str, suffix_to_consider: str = ".csv", file_title_keyword: str = None) -> str:
+def most_recent_file(directory: str, suffix_to_consider: str = None, file_title_keyword: str = None) -> str:
     """ Works only with file-titles starting with YYYY-MM-DD HH_MM_SS (as created by the file_title method above) """
     if "." not in str(directory).split('/')[-1]:
         file_array, date_array = np.array([]), np.array([])
         for file in os.listdir(directory):
             # check for latest csv with ticker in title
-            if file.endswith(suffix_to_consider) and file_title_keyword in file:
-                din_datestring = file[:10]
-                din_timestring = file[11:19].replace('_', ':')
-                date = datetime.fromisoformat(din_datestring + ' ' + din_timestring)
-                date_array = np.append(date_array, date)
-                file_array = np.append(file_array, file)
+            if suffix_to_consider is not None:
+                if not file.endswith(suffix_to_consider): continue
+            if file_title_keyword is not None:  # if keyword provided, check
+                if file_title_keyword not in file: continue
+            din_datestring = file[:10]
+            din_timestring = file[11:19].replace('_', ':')
+            date = datetime.fromisoformat(din_datestring + ' ' + din_timestring)
+            date_array = np.append(date_array, date)
+            file_array = np.append(file_array, file)
         try:
             return directory / file_array[date_array.argsort()[-1]]
         except IndexError:
