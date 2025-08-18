@@ -16,7 +16,7 @@ class MultiProductAgent:
                  observation_horizons_minute: [int],
                  n_leverage_categories: int,
                  include_open_leverage_category: bool = False,
-                 abs_potential_treshold_steps: (float, float, float) = (.0025, .0075, .015),
+                 abs_potential_threshold_steps: (float, float, float) = (.0025, .0075, .015),
                  potential_treshold_horizon_days: int = 90,
                  ):
         """
@@ -34,7 +34,7 @@ class MultiProductAgent:
             Number of leverage categories to consider when determining actions.
         include_open_leverage_category : bool, default False
             Whether to include an open-ended leverage category for very high/low potentials.
-        abs_potential_treshold_steps : tuple of float, default (.0025, .0075, .015)
+        abs_potential_threshold_steps : tuple of float, default (.0025, .0075, .015)
             Thresholds unit is expected return on investment over next potential_treshold_horizon_days days.
             Threshold steps that define zones of potential:
             - Below the first threshold: no action.
@@ -60,11 +60,11 @@ class MultiProductAgent:
         self.potential_treshold_horizon_days = potential_treshold_horizon_days
 
         # initialise thresholds
-        self.abs_potential_treshold_steps = abs_potential_treshold_steps
+        self.abs_potential_threshold_steps = abs_potential_threshold_steps
         if not include_open_leverage_category: n_leverage_categories -= 1  # remove (last_leverage, inf) category
-        buy_long_thresholds = np.linspace(abs_potential_treshold_steps[1], abs_potential_treshold_steps[2],
+        buy_long_thresholds = np.linspace(abs_potential_threshold_steps[1], abs_potential_threshold_steps[2],
                                           n_leverage_categories)  # within this range longs are bought
-        sell_long_thresholds = (np.linspace(abs_potential_treshold_steps[0], abs_potential_treshold_steps[1],
+        sell_long_thresholds = (np.linspace(abs_potential_threshold_steps[0], abs_potential_threshold_steps[1],
                                             n_leverage_categories, endpoint=False) * -1)[
                                ::-1]  # within this range longs are sold, reversed because first highest leverages are sold
         buy_short_thresholds = (buy_long_thresholds * -1)[::-1]  # and vice versa

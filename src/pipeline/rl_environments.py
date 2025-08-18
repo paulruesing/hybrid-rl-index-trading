@@ -787,18 +787,18 @@ class RLTradingEnv(gym.Env):
         std_dev_alpha = normalised_alpha_series.std()
         min_alpha = normalised_alpha_series.min(); max_alpha = normalised_alpha_series.max()
         # normalise risk-free rate according to performance_time_unit
-        risk_free_rate_normalized = sharpe_risk_free_rate_pa if performance_time_unit == 'p.a.' else (1+sharpe_risk_free_rate_pa) ** 1/12 - 1
+        risk_free_rate_normalized = sharpe_risk_free_rate_pa if performance_time_unit == 'p.a.' else (1 + sharpe_risk_free_rate_pa) ** (1/12) - 1
         sharpe_ratio = (mean_policy - risk_free_rate_normalized) / std_dev_policy
 
         if print_statistics:
             print(f"--------- Policy {performance_time_unit} Performance Statistics ---------")
             # policy statistics:
-            print(f"Policy: \tMedian {round(median_policy*100, 3)}%\tMean {round(mean_policy*100, 3)}%\tStd.Dev. {round(std_dev_policy*100, 3)}%")
-            print(f"\t\t\tMax. {round(max_policy*100, 3)}%\t\t\tMin. {round(min_policy*100, 3)}%")
+            print(f"Policy: \tMedian {round(median_policy*100, 3)}%\t\tMean {round(mean_policy*100, 3)}%\tStd.Dev. {round(std_dev_policy*100, 3)}%")
+            print(f"\t\t\tMax. {round(max_policy*100, 3)}%\t\tMin. {round(min_policy*100, 3)}%")
             # alpha statistics:
-            print(f"Alpha:\t\tMedian {round(median_alpha*100, 3)}%\tMean {round(mean_alpha*100, 3)}%\tStd.Dev. {round(std_dev_alpha*100, 3)}%")
-            print(f"\t\t\tMax. {round(max_alpha*100, 3)}%\t\t\tMin. {round(min_alpha*100, 3)}%")
-            print(f"Sharpe Ratio: {round(sharpe_ratio, 3)} - {f'Annual Sharpe Ratio: {round(sharpe_ratio * (12**1/2), 3)}' if performance_time_unit == 'p.m.' else ''}")
+            print(f"Alpha:\t\tMedian {round(median_alpha*100, 3)}%\t\tMean {round(mean_alpha*100, 3)}%\tStd.Dev. {round(std_dev_alpha*100, 3)}%")
+            print(f"\t\t\tMax. {round(max_alpha*100, 3)}%\t\tMin. {round(min_alpha*100, 3)}%")
+            print(f"Sharpe Ratio: {round(sharpe_ratio, 3)} - {f'Annual Sharpe Ratio: {round(sharpe_ratio * (12**(1/2)), 3)}' if performance_time_unit == 'p.m.' else ''}")
             overperform_mask = (normalised_alpha_series > 0)
             print(f"Over-performed {overperform_mask.value_counts()[True]} / {len(overperform_mask)} epochs")
 
@@ -848,11 +848,27 @@ class RLTradingEnv(gym.Env):
         if policy_return_series is not None:
             performance_ax.plot(policy_return_series * 100, marker='o', color='orange', label='Policy')
             if benchmark_return_series is not None:
-                alpha_series = policy_return_series - benchmark_return_series
                 performance_ax.plot(benchmark_return_series * 100, marker='o', color='blue', label='Benchmark')
-                performance_ax.plot(alpha_series * 100, marker='o', color='green', label='Alpha')
+
+                over_perform_mask = (policy_return_series > benchmark_return_series)
+                plottable_over_perform_mask = over_perform_mask | np.roll(over_perform_mask, 1)  # extend each True to the next index
+                # because each return value considers the return until the next value
+                performance_ax.fill_between(policy_return_series.index, benchmark_return_series * 100,
+                                            policy_return_series * 100,
+                                            where=plottable_over_perform_mask,
+                                            edgecolor='green', color='green', alpha=.5,
+                                            label='Over-performance')
+
+                under_perform_mask = (policy_return_series <= benchmark_return_series)
+                plottable_under_perform_mask = under_perform_mask | np.roll(under_perform_mask, 1)  # extend each True to the next index
+                performance_ax.fill_between(policy_return_series.index, benchmark_return_series * 100,
+                                            policy_return_series * 100,
+                                            where=plottable_under_perform_mask,
+                                            edgecolor='red', color='red', alpha=.5,
+                                            label='Under-performance')
+
                 performance_ax.axhline(y=0, color='black')
-            performance_ax.set_xlabel('Datetime');
+            performance_ax.set_xlabel('Date')
             performance_ax.set_ylabel(f"Return {performance_time_unit} [%]")
             performance_ax.legend(loc='upper left')
             performance_ax.grid()
@@ -862,7 +878,7 @@ class RLTradingEnv(gym.Env):
         if isinstance(agent, MultiProductAgent):
             # scale and derive thresholds:
             scaled_thresholds = [threshold * sign * 100 for threshold, sign in
-                                 product(agent.abs_potential_treshold_steps, [-1, 1])]
+                                 product(agent.abs_potential_threshold_steps, [-1, 1])]
             # plot threshold lines:
             for ind, scaled_threshold in enumerate(scaled_thresholds):
                 potential_ax.axhline(y=scaled_threshold, color='purple',
@@ -879,7 +895,7 @@ class RLTradingEnv(gym.Env):
                                           potentials, np.nan)
             potential_ax.plot(dates, sell_short_signals, color='lightgreen', label='Sell Short Signal')
             hold_signals = np.where((potentials > scaled_thresholds[0]) & (potentials < scaled_thresholds[1]),
-                                          potentials, np.nan)
+                                    potentials, np.nan)
             potential_ax.plot(dates, hold_signals, color='grey', label='Hold Signal')
             sell_long_signals = np.where((potentials > scaled_thresholds[2]) & (potentials < scaled_thresholds[0]),
                                          potentials, np.nan)
