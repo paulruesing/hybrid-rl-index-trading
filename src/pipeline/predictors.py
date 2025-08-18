@@ -632,6 +632,7 @@ class LSTMModel(nn.Module):
 class NNPredictor:
     def __init__(self,
                  preset_type: Literal['a1', 'b1', 'b2', 'c1', 'c2', 'd1', 'd2', 'd3'] = None,
+                 name: str = None,
                  # allows for automatic inference of sampling_rate_minutes, daily_prediction_hour,
                  # predict_before_daily_prediction_hour, rolling_window_size and forecast_horizon
                  sampling_rate_minutes: int = 15,  # data import parameters
@@ -667,6 +668,7 @@ class NNPredictor:
             self._predict_before_daily_prediction_hour = predict_before_daily_prediction_hour
             self._rolling_window_size = rolling_window_size
             self._forecast_horizon = forecast_horizon
+            self._preset_type = 'custom'
         else:
             preset_type_dict = {
                 # 15 minutes sampling
@@ -686,8 +688,9 @@ class NNPredictor:
                 'd3': (60 * 14 * 7, 16, True, 48, 6),
             }
             self._sampling_rate_minutes, self._daily_prediction_hour, self._predict_before_daily_prediction_hour, self._rolling_window_size, self._forecast_horizon = preset_type_dict[preset_type]
+            self._preset_type = preset_type
 
-
+        self.name = name
         self._price_csv_path = price_csv_path
         self._date_column = date_column
         self._price_column = price_column
@@ -730,6 +733,23 @@ class NNPredictor:
             'No price file provided yet. Define price_csv_path to trigger data import.')
         if daily_prediction_hour is None and preset_type is None and verbose: print(
             'No daily prediction hour defined yet, hence currently predictions are carried out at every time step. Define daily_prediction_hour to change this.')
+
+    # str and print operators:
+    def __str__(self):
+        return self.describe() if self.name is None else self.name
+
+    def __repr__(self):
+        return self.describe() if self.name is None else self.name
+
+    def describe(self):
+        """ Should be overwritten through inheriting classes. """
+        intro_str = "------------------- NNPredictor Instance -------------------\n\n"
+        data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /14} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- randomise validation data every: {self.randomise_validation_data_every}th epoch\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
+        if self.n_train_epochs is not None:
+            training_str = f"Training Attributes:\n- final training loss: {self.loss_train}\n- final validation loss: {self.loss_val}\n- final training hit-rate: {self.hit_rate_train}\n- final validation hit-rate: {self.hit_rate_val}"
+        else:
+            training_str = "Model wasn't trained yet (or was imported)."
+        return intro_str + data_str + training_str
 
     ### data import properties:
     @property
@@ -784,13 +804,19 @@ class NNPredictor:
         return self._normaliser
 
     @property
+    def preset_type(self) -> Literal['a1', 'b1', 'b2', 'c1', 'c2', 'd1', 'd2', 'd3', 'custom']:
+        """ Predictor preset_type. """
+        return self._preset_type
+
+    @property
     def daily_prediction_hour(self):
         return self._daily_prediction_hour
 
     @daily_prediction_hour.setter
     def daily_prediction_hour(self, value):
-        self._daily_prediction_hour = value;
+        self._daily_prediction_hour = value
         self.prepare_data()
+        self._preset_type = 'custom'
 
     @property
     def predict_before_daily_prediction_hour(self):
@@ -801,6 +827,7 @@ class NNPredictor:
         self._predict_before_daily_prediction_hour = value
         # re-prepare data if sampling rate is below 1 hour, because point of prediction changes
         if self.sampling_rate_minutes < 60: self.prepare_data()
+        self._preset_type = 'custom'
 
     @property
     def rolling_window_size(self):
@@ -810,6 +837,7 @@ class NNPredictor:
     def rolling_window_size(self, value):
         self._rolling_window_size = value;
         self.prepare_data()
+        self._preset_type = 'custom'
 
     @property
     def forecast_horizon(self):
@@ -819,6 +847,7 @@ class NNPredictor:
     def forecast_horizon(self, value):
         self._forecast_horizon = value;
         self.prepare_data()
+        self._preset_type = 'custom'
 
     @property
     def X(self):
@@ -1283,6 +1312,7 @@ class LSTMPredictor(NNPredictor):
                  preset_type: Literal['a1', 'b1', 'b2', 'c1', 'c2', 'd1', 'd2', 'd3'] = None,
                  # allows for automatic inference of sampling_rate_minutes, daily_prediction_hour,
                  # predict_before_daily_prediction_hour, rolling_window_size and forecast_horizon
+                 name: str = None,
                  sampling_rate_minutes: int = 15,  # data import parameters
                  price_csv_path: str = None,
                  price_column: str = 'close',
@@ -1318,7 +1348,7 @@ class LSTMPredictor(NNPredictor):
                  ):
         super().__init__(price_csv_path=price_csv_path, date_column=date_column,
                          price_column=price_column,
-                         preset_type=preset_type, rolling_window_size=rolling_window_size,
+                         preset_type=preset_type, name=name, rolling_window_size=rolling_window_size,
                          forecast_horizon=forecast_horizon, sampling_rate_minutes=sampling_rate_minutes,
                          validation_split=validation_split, randomise_validation_data_every=randomise_validation_data_every,
                          daily_prediction_hour=daily_prediction_hour,
@@ -1359,13 +1389,7 @@ class LSTMPredictor(NNPredictor):
                 print('Training finished. Plotting results for validation split:')
                 self.plot_prediction_overview(day_slice=(0, 5))
 
-    # str and print operators:
-    def __str__(self):
-        return self.describe()
-
-    def __repr__(self):
-        return self.describe()
-
+    # if no name is provided, this method is called as str-representation:
     def describe(self):
         intro_str = "------------------- LSTMPredictor Instance -------------------\n\n"
         data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /14} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- randomise validation data every: {self.randomise_validation_data_every}th epoch\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
@@ -1504,6 +1528,7 @@ class TransformerPredictor(NNPredictor):
                  preset_type: Literal['a1', 'b1', 'b2', 'c1', 'c2', 'd1', 'd2', 'd3'] = None,
                  # allows for automatic inference of sampling_rate_minutes, daily_prediction_hour,
                  # predict_before_daily_prediction_hour, rolling_window_size and forecast_horizon
+                 name: str = None,
                  sampling_rate_minutes: int = 15,  # data import parameters
                  price_csv_path: str = None,
                  price_column: str = 'close',
@@ -1540,7 +1565,7 @@ class TransformerPredictor(NNPredictor):
                  ):
         super().__init__(price_csv_path=price_csv_path, date_column=date_column,
                          price_column=price_column,
-                         preset_type=preset_type, rolling_window_size=rolling_window_size,
+                         preset_type=preset_type, name=name, rolling_window_size=rolling_window_size,
                          forecast_horizon=forecast_horizon, sampling_rate_minutes=sampling_rate_minutes,
                          validation_split=validation_split, randomise_validation_data_every=randomise_validation_data_every,
                          daily_prediction_hour=daily_prediction_hour,
@@ -1581,13 +1606,7 @@ class TransformerPredictor(NNPredictor):
                 print('Training finished. Plotting results for validation split:')
                 self.plot_prediction_overview(day_slice=(0, 5))
 
-    # str and print operators:
-    def __str__(self):
-        return self.describe()
-
-    def __repr__(self):
-        return self.describe()
-
+    # if no name is provided, this method is called as str-representation:
     def describe(self):
         intro_str = "------------------- TransformerPredictor Instance -------------------\n\n"
         data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /14} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- randomise validation data every: {self.randomise_validation_data_every}th epoch\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
