@@ -1,3 +1,5 @@
+from statistics import median
+
 import src.pipeline.preprocessing as preprocessing
 from src.pipeline.predictors import LSTMPredictor
 from src.pipeline.financial_products import KOCertificate, KOCertificateSet
@@ -703,11 +705,15 @@ class RLTradingEnv(gym.Env):
                          save_log_directory: str = None,
                          plot_results: bool = True,
                          performance_time_unit: Literal['p.a.', 'p.m.'] = 'p.m.',
+                         sharpe_risk_free_rate_pa: float = .0278,
                          **plot_kwargs
-                         ) -> (pd.Series, pd.Series):
+                         ) -> (pd.Series, pd.Series, (float, float, float, float, float, float)):
         """
         Simulate agent behavior in environment.
-        Returns tuple with policy_performance and benchmark_performance as pd.Series normalised across performance_time_unit.
+        Returns tuple with
+        1) policy_performance
+        2) benchmark_performance as pd.Series normalised across performance_time_unit
+        3) tuple with (mean, median, std.dev., min, max, SharpeRatio) alpha.
         """
         if reset_environment: obs, _ = self.reset()  # reset episode and fetch first observation
         else: obs = self.current_observation  # or fetch current observation
@@ -770,17 +776,29 @@ class RLTradingEnv(gym.Env):
         if save_log_directory:  # eventually save model
             log.to_csv(save_log_directory / filemgmt.file_title("Environment Backtest Log", dtype_suffix='.csv'))
 
-        # print summary statistics:
+        # compute portfolio statistics:
+        mean_policy = normalised_policy_return_series.mean(); median_policy = normalised_policy_return_series.median()
+        std_dev_policy = normalised_policy_return_series.std()
+        min_policy = normalised_policy_return_series.min(); max_policy = normalised_policy_return_series.max()
+
+        # compute alpha statistics:
+        normalised_alpha_series = normalised_policy_return_series - normalised_benchmark_return_series
+        mean_alpha = normalised_alpha_series.mean(); median_alpha = normalised_alpha_series.median()
+        std_dev_alpha = normalised_alpha_series.std()
+        min_alpha = normalised_alpha_series.min(); max_alpha = normalised_alpha_series.max()
+        # normalise risk-free rate according to performance_time_unit
+        risk_free_rate_normalized = sharpe_risk_free_rate_pa if performance_time_unit == 'p.a.' else (1+sharpe_risk_free_rate_pa) ** 1/12 - 1
+        sharpe_ratio = (mean_policy - risk_free_rate_normalized) / std_dev_policy
+
         if print_statistics:
             print(f"--------- Policy {performance_time_unit} Performance Statistics ---------")
-            # compute alpha:
-            normalised_alpha_series = normalised_policy_return_series - normalised_benchmark_return_series
             # policy statistics:
-            print(f"Policy: \tMedian {normalised_policy_return_series.median()}\tMean {normalised_policy_return_series.mean()}\tStd.Dev. {normalised_policy_return_series.std()}")
-            print(f"\t\t\tMax. {normalised_policy_return_series.max()}\tMin. {normalised_policy_return_series.min()}")
+            print(f"Policy: \tMedian {round(median_policy*100, 3)}%\tMean {round(mean_policy*100, 3)}%\tStd.Dev. {round(std_dev_policy*100, 3)}%")
+            print(f"\t\t\tMax. {round(max_policy*100, 3)}%\t\t\tMin. {round(min_policy*100, 3)}%")
             # alpha statistics:
-            print(f"Alpha: \tMedian {normalised_alpha_series.median()}\tMean {normalised_alpha_series.mean()}\tStd.Dev. {normalised_alpha_series.std()}")
-            print(f"\t\t\tMax. {normalised_alpha_series.max()}\tMin. {normalised_alpha_series.min()}")
+            print(f"Alpha:\t\tMedian {round(median_alpha*100, 3)}%\tMean {round(mean_alpha*100, 3)}%\tStd.Dev. {round(std_dev_alpha*100, 3)}%")
+            print(f"\t\t\tMax. {round(max_alpha*100, 3)}%\t\t\tMin. {round(min_alpha*100, 3)}%")
+            print(f"Sharpe Ratio: {round(sharpe_ratio, 3)} - {f'Annual Sharpe Ratio: {round(sharpe_ratio * (12**1/2), 3)}' if performance_time_unit == 'p.m.' else ''}")
             overperform_mask = (normalised_alpha_series > 0)
             print(f"Over-performed {overperform_mask.value_counts()[True]} / {len(overperform_mask)} epochs")
 
@@ -792,7 +810,7 @@ class RLTradingEnv(gym.Env):
                                        **plot_kwargs)
 
 
-        return normalised_policy_return_series, normalised_benchmark_return_series
+        return normalised_policy_return_series, normalised_benchmark_return_series, (mean_alpha, median_alpha, std_dev_alpha, min_alpha, max_alpha, sharpe_ratio)
 
     def plot_backtest_results(self, log_df: pd.DataFrame,
                               policy_return_series: pd.Series = None,
