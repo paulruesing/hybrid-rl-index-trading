@@ -673,7 +673,7 @@ class NNPredictor:
             preset_type_dict = {
                 # 15 minutes sampling
                 'a1': (15, 13, False, 20, 12),
-
+                # values = sampling_rate_min, daily_prediction_hour, predict_before_daily_prediction_hour, rolling_window_size, forecast_horizon
                 # 1 hour sampling:
                 'b1': (60, 16, True, 42, 14),
                 'b2': (60, 16, True, 70, 14),

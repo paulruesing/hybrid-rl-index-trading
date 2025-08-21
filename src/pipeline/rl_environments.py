@@ -793,10 +793,10 @@ class RLTradingEnv(gym.Env):
         if print_statistics:
             print(f"--------- Policy {performance_time_unit} Performance Statistics ---------")
             # policy statistics:
-            print(f"Policy: \tMedian {round(median_policy*100, 3)}%\t\tMean {round(mean_policy*100, 3)}%\tStd.Dev. {round(std_dev_policy*100, 3)}%")
+            print(f"Policy: \tMedian {round(median_policy*100, 3)}%\t\tMean {round(mean_policy*100, 3)}%\t\tStd.Dev. {round(std_dev_policy*100, 3)}%")
             print(f"\t\t\tMax. {round(max_policy*100, 3)}%\t\tMin. {round(min_policy*100, 3)}%")
             # alpha statistics:
-            print(f"Alpha:\t\tMedian {round(median_alpha*100, 3)}%\t\tMean {round(mean_alpha*100, 3)}%\tStd.Dev. {round(std_dev_alpha*100, 3)}%")
+            print(f"Alpha:\t\tMedian {round(median_alpha*100, 3)}%\t\tMean {round(mean_alpha*100, 3)}%\t\tStd.Dev. {round(std_dev_alpha*100, 3)}%")
             print(f"\t\t\tMax. {round(max_alpha*100, 3)}%\t\tMin. {round(min_alpha*100, 3)}%")
             print(f"Sharpe Ratio: {round(sharpe_ratio, 3)} - {f'Annual Sharpe Ratio: {round(sharpe_ratio * (12**(1/2)), 3)}' if performance_time_unit == 'p.m.' else ''}")
             overperform_mask = (normalised_alpha_series > 0)

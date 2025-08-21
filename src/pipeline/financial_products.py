@@ -492,6 +492,11 @@ class KOCertificate:
             if self._underlying_price_series.index.min() < pd.Timestamp(self.issue_date):
                 return self._underlying_price_series[self.issue_date:]  # return prices starting at issue date
         else: return self._underlying_price_series  # return all provided prices
+    @underlying_price_series.setter
+    def underlying_price_series(self, value: pd.Series):
+        """ Changing value re-computes base-price series. """
+        self._underlying_price_series = value
+        self._base_price_series = None
 
     @property
     def intrinsic_value_series(self):
@@ -527,7 +532,7 @@ class KOCertificate:
     @property
     def price_series(self):
         """
-        Full price series of the future product, incorporating
+        Resulting price series of the future product, incorporating
         intrinsic value and constant risk premium.
 
         Returns
@@ -622,7 +627,7 @@ class KOCertificateSet:
 
     Parameters
     ----------
-    future_product_instances : list of KOCertificate, optional
+    ko_certificates : list of KOCertificate, optional
         A list of pre-defined `KOCertificate` objects to include in the set. If not provided,
         the products will be automatically created using the specified leverage parameters.
     underlying_price_series : pd.Series, optional
@@ -633,7 +638,7 @@ class KOCertificateSet:
         Required for automatic product generation.
     n_products_per_direction : int, optional
         Number of products to generate per direction (long/short). Required if
-        `future_product_instances` is not provided.
+        `ko_certificates` is not provided.
     lowest_leverage : float, optional
         The lowest leverage value to include when generating products.
     highest_leverage : float, optional
@@ -642,12 +647,12 @@ class KOCertificateSet:
     Raises
     ------
     AttributeError
-        If `future_product_instances` is not provided and required parameters for automatic
+        If `ko_certificates` is not provided and required parameters for automatic
         initialization are missing.
     """
 
     def __init__(self,
-                 future_product_instances: [KOCertificate] = None,
+                 ko_certificates: [KOCertificate] = None,
                  underlying_price_series: pd.Series = None,
                  base_price_inference_timestamps: [str] = None,
                  n_products_per_direction: int = None,
@@ -660,16 +665,16 @@ class KOCertificateSet:
         self._long_leverage_frame = self._short_leverage_frame = self._price_frame = None  # accessible through property
         self._isin_product_dict = None  # accessible through property
 
-        if future_product_instances is not None:  # initialise products from provided list
+        if ko_certificates is not None:  # initialise products from provided list
             # convert product instances to list if necessary:
-            if not isinstance(future_product_instances, list): future_product_instances = [future_product_instances]
-            self._future_product_instances = future_product_instances
+            if not isinstance(ko_certificates, list): ko_certificates = [ko_certificates]
+            self._ko_certificates = ko_certificates
         else:  # or from desired leverages:
             # sanity check:
             if underlying_price_series is None or n_products_per_direction is None or lowest_leverage is None or highest_leverage is None or base_price_inference_timestamps is None:
                 raise AttributeError(
-                    "If no future_product_instances are provided all other arguments need to be defined for automatic product initialisation from desired leverages.")
-            self._future_product_instances = self.initialise_products_from_leverage(
+                    "If no ko_certificates are provided all other arguments need to be defined for automatic product initialisation from desired leverages.")
+            self._ko_certificates = self.initialise_products_from_leverage(
                 underlying_price_series=underlying_price_series,
                 base_price_inference_timestamps=base_price_inference_timestamps if isinstance(
                     base_price_inference_timestamps,
@@ -701,8 +706,8 @@ class KOCertificateSet:
         fig, (long_ax, short_ax) = plt.subplots(2, 1, figsize=plot_size)
 
         # split by direction:
-        long_list = [product for product in self.future_product_instances if product.direction == 'long']
-        short_list = [product for product in self.future_product_instances if product.direction == 'short']
+        long_list = [product for product in self.ko_certificates if product.direction == 'long']
+        short_list = [product for product in self.ko_certificates if product.direction == 'short']
 
         for ax, product_list in zip([long_ax, short_ax], [long_list, short_list]):
             # prepare list of colors:
@@ -724,7 +729,8 @@ class KOCertificateSet:
         short_ax.set_title('Short Products')
         fig.tight_layout()
 
-    def generate_new_isin(self, direction: Literal["long", "short"] = None) -> str:
+    # auxiliary method
+    def _generate_new_isin(self, direction: Literal["long", "short"] = None) -> str:
         """ Generate new artificial ISIN while preventing duplicates. """
         if self._last_isin_counter > 9999: self._last_isin_counter = 0  # reset counter upon max displayable int
         new_isin = f"ARTIF{('LO' if direction == 'long' else 'SH') if direction is not None else '00'}{str(self._last_isin_counter).zfill(4)}"
@@ -772,7 +778,7 @@ class KOCertificateSet:
         for base_price_inference_timestamp in base_price_inference_timestamps:
             # initialise products
             temp_product_list = [KOCertificate(underlying_price_series=underlying_price_series,
-                                               isin=self.generate_new_isin(direction=dir),
+                                               isin=self._generate_new_isin(direction=dir),
                                                scrape_data_if_possible=False, direction=dir, issue_date=issue_date) for
                                  dir in desired_directions]
             # infer base price from leverages at base_price:
@@ -867,16 +873,23 @@ class KOCertificateSet:
                       avail_frame[column].value_counts()[True] / len(avail_frame) * 100, "%")
 
         return avail_frame
-
+    
+    def update_all_price_series(self, price_series: pd.Series):
+        """ Iterates through all ko_certificates and updates underlying_price_series. """
+        for product in self.ko_certificates:
+            product.underlying_price_series = price_series
+        # reset pre-calculated attributes:
+        self._long_leverage_frame = None; self._short_leverage_frame = None; self._price_frame = None
+    
     ######### Properties #######
     @property
-    def future_product_instances(self) -> [KOCertificate]:
-        """ List of included future products. Changing resets private attributes _date_leverage_frame and _isin_product_dict. """
-        return self._future_product_instances
+    def ko_certificates(self) -> [KOCertificate]:
+        """ List of included ko_certificates. Changing resets private attributes _date_leverage_frame and _isin_product_dict. """
+        return self._ko_certificates
 
-    @future_product_instances.setter
-    def future_product_instances(self, value: [KOCertificate]):
-        self._future_product_instances = value
+    @ko_certificates.setter
+    def ko_certificates(self, value: [KOCertificate]):
+        self._ko_certificates = value
         self._isin_product_dict = None
         self._long_leverage_frame = self._short_leverage_frame = self._price_frame = None
 
@@ -884,7 +897,7 @@ class KOCertificateSet:
     def by_isin(self) -> {str: KOCertificate}:
         """ Locate product from set by ISIN. """
         if self._isin_product_dict is None:
-            self._isin_product_dict = {product.isin: product for product in self.future_product_instances}
+            self._isin_product_dict = {product.isin: product for product in self.ko_certificates}
         return self._isin_product_dict
 
     @property
@@ -892,7 +905,7 @@ class KOCertificateSet:
         """ Dataframe with all product's prices by date (rows) and product-isin (columns). """
         if self._price_frame is None:
             self._price_frame = pd.DataFrame(
-                {product.isin: product.price_series for product in self.future_product_instances})
+                {product.isin: product.price_series for product in self.ko_certificates})
         return self._price_frame
 
     @property
@@ -900,7 +913,7 @@ class KOCertificateSet:
         """ Dataframe with long products' leverages by date (rows) and product-isin (columns). """
         if self._long_leverage_frame is None:
             self._long_leverage_frame = pd.DataFrame(
-                {product.isin: product.leverage_series for product in self.future_product_instances if
+                {product.isin: product.leverage_series for product in self.ko_certificates if
                  product.direction == 'long'})
             self._long_leverage_frame.fillna(0,
                                              inplace=True)  # na arises if issue date is later than considered timestamp, 0 is used as identifier that product isn't available (either KO or not yet issued)
@@ -911,7 +924,7 @@ class KOCertificateSet:
         """ Dataframe with short products' leverages by date (rows) and product-isin (columns). """
         if self._short_leverage_frame is None:
             self._short_leverage_frame = pd.DataFrame(
-                {product.isin: product.leverage_series for product in self.future_product_instances if
+                {product.isin: product.leverage_series for product in self.ko_certificates if
                  product.direction == 'short'})
             self._short_leverage_frame.fillna(0,
                                               inplace=True)  # na arises if issue date is later than considered timestamp, 0 is used as identifier that product isn't available (either KO or not yet issued)
