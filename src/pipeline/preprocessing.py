@@ -37,16 +37,311 @@ class Normaliser():
             "Please use fit_transform first so this instance remembers the respective std. and mean values!")
         return (x * self.sd) + self.mu
 
+
+class StockPriceDataManager:
+    """
+    Class for managing stock price data, including downloading, interpolating, and adjusting ETF data.
+
+    Attributes
+    ----------
+    ticker_symbol : str
+        The ticker symbol for the stock or ETF.
+    download_dir : Path
+        Directory where downloaded data files are stored.
+    interpolated_files_dir : Path
+        Directory where interpolated data files are stored.
+    env_sampling_rate_minutes : Literal[15, 60, 1440]
+        Sampling rate in minutes for interpolated data.
+    price_column : Literal['low', 'high', 'open', 'close']
+        Price column to use for calculations and interpolations.
+    is_etf_price_data : bool
+        Indicates if the data pertains to ETF prices.
+    non_etf_time_price_tuples : [(pd.Timestamp, float)]
+        Time and price tuples for non-ETF counterpart data.
+    download_time_increment : str
+        Time increment for scheduling downloads, e.g., "6h".
+    manual_operating_h_tuple : (int, int)
+        Tuple representing manual operating hours (start, end).
+    custom_start_h_min_tuple : (int, int)
+        Tuple representing custom operating start time (hour, minute).
+
+    Properties
+    ----------
+    non_etf_time_price_tuples : tuple
+        Time and price tuples for non-ETF counterpart data.
+    non_etf_price_factor : float
+        Factor for converting ETF price data to non-ETF price data.
+    env_sampling_rate_str : str
+        String representation of the environment sampling rate.
+    a_sampling_rate_str : str
+        String representation of a-predictor sampling rate.
+    b_sampling_rate_str : str
+        String representation of b-predictor sampling rate.
+    c_sampling_rate_str : str
+        String representation of c-predictor sampling rate.
+    d_sampling_rate_str : str
+        String representation of d-predictor sampling rate.
+    env_interp_prices : pd.Series
+        Interpolated prices for the environment sampling rate.
+    non_etf_env_interp_prices : pd.Series
+        Interpolated prices for the environment sampling rate, multiplied by the non-ETF price factor.
+    a_interp_prices : pd.Series
+        Interpolated prices for the a-predictor sampling rate.
+    b_interp_prices : pd.Series
+        Interpolated prices for the b-predictor sampling rate.
+    c_interp_prices : pd.Series
+        Interpolated prices for the c-predictor sampling rate.
+    d_interp_prices : pd.Series
+        Interpolated prices for the d-predictor sampling rate.
+    downloaded_price_frame : pd.DataFrame
+        Dataframe of the most recently downloaded price data.
+    downloaded_prices : pd.Series
+        Series of the most recently downloaded prices according to the specified price column.
+    interp_data_time_range : (pd.Timestamp, pd.Timestamp)
+        Time range of the interpolated data.
+    downloaded_data_time_range : (pd.Timestamp, pd.Timestamp)
+        Time range of the downloaded data.
+
+    Methods
+    -------
+    download_new_data()
+        Downloads the most recent price data from AlphaVantage.
+    """
+
+    def __init__(self,
+                 ticker_symbol: str,
+                 download_dir: Path,
+                 interpolated_files_dir: Path,
+                 alpha_vantage_api_key: str,
+                 env_sampling_rate_minutes: Literal[15, 60, 1440] = 15,
+                 price_column: Literal['low', 'high', 'open', 'close'] = 'close',
+                 is_etf_price_data: bool = False,
+                 non_etf_time_price_tuples: [(pd.Timestamp, float)] = None,
+                 download_time_increment: str = "6h",  # for US downloads
+                 manual_operating_h_tuple: (int, int) = (8, 22),
+                 custom_start_h_min_tuple: (int, int) = (16, 0),
+                 ):
+        self.ticker_symbol = ticker_symbol
+        self.download_dir = download_dir
+        self.interpolated_files_dir = interpolated_files_dir
+        self._alpha_vantage_api_key = alpha_vantage_api_key
+        self.env_sampling_rate_minutes = env_sampling_rate_minutes
+        self.price_column = price_column
+        self.is_etf_price_data = is_etf_price_data
+        self._non_etf_time_price_tuples = non_etf_time_price_tuples
+        self.download_time_increment = download_time_increment
+        self.manual_operating_h_tuple = manual_operating_h_tuple
+        self.custom_start_h_min_tuple = custom_start_h_min_tuple
+
+        # placeholders for properties:
+        self._non_etf_price_factor = None
+
+        # not necesssary, reading out is enough:
+        self._present_data_timerange = None
+
+    #### Amenable Properties ####
+    @property
+    def non_etf_time_price_tuples(self) -> tuple:
+        return self._non_etf_time_price_tuples
+
+    @non_etf_time_price_tuples.setter
+    def non_etf_time_price_tuples(self, value: tuple) -> None:
+        self._non_etf_time_price_tuples = value
+        self._non_etf_price_factor = None
+
+    #### Saved Properties ####
+    @property
+    def non_etf_price_factor(self) -> float:
+        """
+        Fetches or calculates the non-ETF price factor for converting ETF price data into its underlying equivalent.
+
+        Returns
+        -------
+        float
+            A factor to adjust ETF price data, defaulting to 1.0 for non-ETF data. Raises an exception if the required data for computation is missing.
+
+        Raises
+        ------
+        AttributeError
+            If the non-ETF time-price tuples are not provided while ETF price data conversion is needed.
+        """
+        if not self.is_etf_price_data: return 1.0
+
+        if self._non_etf_price_factor is None:
+            if self._non_etf_time_price_tuples is None:
+                raise AttributeError(
+                    "Non-etf time-price tuples need to be provided for conversion of ETF data into underlying.")
+            # compute multipliers and take mean:
+            multipliers = [price / self.env_interp_prices.loc[date] for date, price in self.non_etf_time_price_tuples]
+            self._non_etf_price_factor = np.mean(multipliers)
+        return self._non_etf_price_factor
+
+    ### Read-out at Runtime Properties ####
+    ## sampling rates:
+    @property
+    def env_sampling_rate_str(self) -> str:
+        """ Timedelta string related to environment sampling rate based on self.env_sampling_rate_minutes """
+        minutes_to_str_dict = {15: self.a_sampling_rate_str, 60: self.b_sampling_rate_str,
+                               1440: self.c_sampling_rate_str}
+        return minutes_to_str_dict[self.env_sampling_rate_minutes]
+
+    @property  # todo: read out global variable?
+    def a_sampling_rate_str(self) -> str:
+        return "15min"
+
+    @property  # todo: read out global variable?
+    def b_sampling_rate_str(self) -> str:
+        return "60min"
+
+    @property  # todo: read out global variable?
+    def c_sampling_rate_str(self) -> str:
+        return "1d"
+
+    @property  # todo: read out global variable?
+    def d_sampling_rate_str(self) -> str:
+        return "7d"
+
+    ## price frames:
+    @property
+    def env_interp_prices(self) -> pd.Series:
+        """ Interpolated prices sampled at env_sampling_rate_minutes. """
+        return read_price_csv(
+            filemgmt.most_recent_file(self.interpolated_files_dir,
+                                      suffix_to_consider=".csv",
+                                      file_title_keywords=[self.ticker_symbol, self.env_sampling_rate_str]),
+            date_column='date', price_column=self.price_column)
+
+    @property
+    def non_etf_env_interp_prices(self) -> pd.Series:
+        """ Interpolated prices sampled at env_sampling_rate_minutes and multiplied by non_etf_price_factor. """
+        return read_price_csv(
+            filemgmt.most_recent_file(self.interpolated_files_dir,
+                                      suffix_to_consider=".csv",
+                                      file_title_keywords=[self.ticker_symbol, self.env_sampling_rate_str]),
+            date_column='date',
+            price_column=self.price_column) * self.non_etf_price_factor  # multiply with non-etf-factor
+
+    @property
+    def a_interp_prices(self) -> pd.Series:
+        """ Interpolated prices sampled at a-predictor-type sampling rate. """
+        return read_price_csv(
+            filemgmt.most_recent_file(self.interpolated_files_dir,
+                                      suffix_to_consider=".csv",
+                                      file_title_keywords=[self.ticker_symbol, self.a_sampling_rate_str]),
+            date_column='date', price_column=self.price_column)
+
+    @property
+    def b_interp_prices(self) -> pd.Series:
+        """ Interpolated prices sampled at b-predictor-type sampling rate. """
+        return read_price_csv(
+            filemgmt.most_recent_file(self.interpolated_files_dir,
+                                      suffix_to_consider=".csv",
+                                      file_title_keywords=[self.ticker_symbol, self.env_sampling_rate_str]),
+            date_column='date', price_column=self.price_column)
+
+    @property
+    def c_interp_prices(self) -> pd.Series:
+        """ Interpolated prices sampled at c-predictor-type sampling rate. """
+        return read_price_csv(
+            filemgmt.most_recent_file(self.interpolated_files_dir,
+                                      suffix_to_consider=".csv",
+                                      file_title_keywords=[self.ticker_symbol, self.c_sampling_rate_str]),
+            date_column='date', price_column=self.price_column)
+
+    @property
+    def d_interp_prices(self) -> pd.Series:
+        """ Interpolated prices sampled at d-predictor-type sampling rate. """
+        return read_price_csv(
+            filemgmt.most_recent_file(self.interpolated_files_dir,
+                                      suffix_to_consider=".csv",
+                                      file_title_keywords=[self.ticker_symbol, self.d_sampling_rate_str]),
+            date_column='date', price_column=self.price_column)
+
+    @property
+    def downloaded_price_frame(self) -> pd.DataFrame:
+        """ Most recent price download dataframe. """
+        frame = pd.read_csv(
+            filemgmt.most_recent_file(self.download_dir,
+                                      suffix_to_consider=".csv",
+                                      file_title_keywords=[self.ticker_symbol])
+        )
+        frame['date'] = pd.to_datetime(frame['date'])
+        return frame.set_index('date').dropna(axis=0)
+
+    @property
+    def downloaded_prices(self) -> pd.Series:
+        """ Most recent price download series according to self.price_column. """
+        alpha_vantage_column_renaming = {'1. open': 'open', '2. high': 'high', '3. low': 'low', '4. close': 'close'}
+        price_frame = self.downloaded_price_frame.rename(columns=alpha_vantage_column_renaming)
+        return price_frame[self.price_column]
+
+    ## other:
+    @property
+    def interp_data_time_range(self) -> (pd.Timestamp, pd.Timestamp):
+        """ Time range of interpolated data. """
+        date_times = self.env_interp_prices.index  # we assume all time ranges are equal because all are updated jointly
+        return date_times.min(), date_times.max()
+
+    @property
+    def downloaded_data_time_range(self) -> (pd.Timestamp, pd.Timestamp):
+        """ Time range of downloaded data. """
+        date_times = self.downloaded_prices.index  # we assume all time ranges are equal because all are updated jointly
+        return date_times.min(), date_times.max()
+
+    #### Methods ####
+    def download_new_data(self):
+        """ Download most recent data from AlphaVantage """
+        # define timerange to download:
+        latest_data = self.downloaded_data_time_range[1]
+        start_tuple = (latest_data.year, latest_data.month)
+        end_tuple = (datetime.today().year, datetime.today().month)
+
+        get_data_from_alphavantage(self._alpha_vantage_api_key,
+                                   ticker=self.ticker_symbol,
+                                   save_path=self.download_dir,
+                                   start_year_month=start_tuple,
+                                   end_year_month=end_tuple,
+                                   price_frame_to_concat=self.downloaded_price_frame,
+                                   time_increment=self.download_time_increment)
+
+    def update_interpolated_data(self):
+        """ Interpolate and sample all price files based on most recent data download. """
+        for sampling_rate_str in [self.a_sampling_rate_str, self.b_sampling_rate_str, self.c_sampling_rate_str,
+                                  self.d_sampling_rate_str]:
+            time_interpolation_new_sampling_rate(price_series=self.downloaded_prices,
+                                                 datetime_column='date',
+                                                 new_sampling_rate=sampling_rate_str,
+                                                 moving_average_window_size=None,
+                                                 custom_start_hour=
+                                                 self.custom_start_h_min_tuple[0],
+                                                 custom_start_minute=
+                                                 self.custom_start_h_min_tuple[1],
+                                                 verbose=False,
+                                                 manual_operating_hours=self.manual_operating_h_tuple,
+                                                 save_path=self.interpolated_files_dir,
+                                                 save_title_identifier=f'{self.ticker_symbol} {self.price_column}')
+
+    def update(self):
+        """ Update downloaded and interpolated data. """
+        print(
+            f"Downloaded data ranged from\t{self.downloaded_data_time_range[0]} to {self.downloaded_data_time_range[1]}")
+        self.download_new_data()
+        print(f"now ranges from\t\t\t\t{self.downloaded_data_time_range[0]} to {self.downloaded_data_time_range[1]}")
+        print(f"\nInterpolated data ranged from\t{self.interp_data_time_range[0]} to {self.interp_data_time_range[1]}")
+        self.update_interpolated_data()
+        print(f"now ranges from\t\t\t\t\t{self.interp_data_time_range[0]} to {self.interp_data_time_range[1]}")
+
+
 ### Data manipulation functions
-def time_interpolation_new_sampling_rate(df: Union[pd.DataFrame, pd.Series], interpolation_column: str,
-                                         datetime_column: str,
+def time_interpolation_new_sampling_rate(price_series: pd.Series,
+                                         datetime_column: str = 'date',
                                          new_sampling_rate: str = '1min',
                                          moving_average_window_size: str = None,
                                          custom_start_hour: int = None, custom_start_minute: int = None,
                                          df_lowest_time_unit: Literal['15min', '1min', '1sec'] = '1min',
                                          verbose=False,
                                          save_path=None, save_title_identifier: str = None,
-                                         new_price_column_label: str = 'close',
+                                         new_price_column_label: str = None,
                                          exclude_non_operating_hours=True, manual_operating_hours: (int, int) = None,
                                          exclude_weekends=True):
     """
@@ -113,10 +408,8 @@ def time_interpolation_new_sampling_rate(df: Union[pd.DataFrame, pd.Series], int
     ...                                               manual_operating_hours=(9, 17))
     """
     # prepare data
-    if isinstance(df, pd.DataFrame):
-        df = df.loc[:, [datetime_column, interpolation_column]].copy()
-    else:
-        df = pd.DataFrame(df.copy()).reset_index()
+    df = pd.DataFrame(price_series.copy()).reset_index()  # create dataframe
+    interpolation_column = price_series.name
     df[datetime_column] = pd.to_datetime(df[datetime_column])
     df.set_index(datetime_column, inplace=True)
 
@@ -164,7 +457,8 @@ def time_interpolation_new_sampling_rate(df: Union[pd.DataFrame, pd.Series], int
             print(f"Smoothed interpolated data using moving average with {moving_average_window_size} window.")
 
     # renaming:
-    interpolated_prices.rename(columns={interpolation_column: new_price_column_label}, inplace=True)
+    if new_price_column_label is not None:
+        interpolated_prices.rename(columns={interpolation_column: new_price_column_label}, inplace=True)
     interpolated_prices.index.name = datetime_column
 
     # save data:
@@ -289,8 +583,8 @@ def create_train_validation_split(X: np.ndarray, Y: np.ndarray,
 
 
 ### Data download functions
-def read_price_csv(csv_path: str, date_column: str = "date", price_column: str = "close") -> pd.DataFrame:
-    """ Read price csv file. Static method to be used also in other classes. """
+def read_price_csv(csv_path: str, date_column: str = "date", price_column: str = "close") -> pd.Series:
+    """ Read price csv file. Type conversion, NA-cleaning and formatting. """
     # import csv w correct dtypes:
     price_file = pd.read_csv(csv_path).dropna(axis=0)
     try:
@@ -375,9 +669,9 @@ def get_data_from_alphavantage(api_key: str,
                                ticker: str = 'DAX',
                                start_year_month: (int, int) = None, end_year_month: (int, int) = None,
                                sampling_rate: Literal['1min', '5min', '15min', '30min', '60min'] = '1min',
-                               price_column: Literal["1. open", "2. high", "3. low", "4. close"] = '4. close',
                                time_increment: str = None, time_decrement: str = None,
-                               csv_path_to_concat: str = None,
+                               price_csv_dir_to_concat: Union[Path, str] = None,
+                               price_frame_to_concat: pd.DataFrame = None,
                                save_path=None) -> pd.DataFrame:
     """
     Data downloader utilising alpha-vantage's API.
@@ -396,8 +690,10 @@ def get_data_from_alphavantage(api_key: str,
         Time-zone adjustment. Will be added to date column. E.g. '6h' for adjusting from UCT-4 (New York) to UCT+2 (Frankfurt)
     :param time_decrement: str, optional
         Time-zone adjustment. Will be subtracted from date column.
-    :param csv_path_to_concat: str, optional
-        Path to csv file from previous download which should be extended.
+    :param price_csv_dir_to_concat: str, optional
+        Dir of csv files from previous download, the most recent file will be extended.
+    :param price_frame_to_concat: pd.DataFrame, optional
+        Dataframe from previous download to be extended. Overrules price_csv_dir_to_concat.
     :param save_path: str, optional
         File-title string defining repository where to save the downloaded data. If not provided, will not save the results.
 
@@ -435,19 +731,24 @@ def get_data_from_alphavantage(api_key: str,
         list_of_year_month_strings.append(None)
 
     # prepare dataframe or load existing one:
-    if csv_path_to_concat is not None:
-        try:  # if csv_path_to_concat is a directory:
-            csv_path_to_concat = filemgmt.most_recent_file(csv_path_to_concat, ".csv", ticker)
-            print(f'Since provided csv_path_to_concat is a directory will now load: {csv_path_to_concat}')
-        except NotADirectoryError:
-            pass  # in that case no change necessary
+    if price_frame_to_concat is not None or price_csv_dir_to_concat is not None:
+        if price_frame_to_concat is None:  # load from csv dir
+            try:  # if price_csv_dir_to_concat is a directory:
+                price_csv_dir_to_concat = filemgmt.most_recent_file(price_csv_dir_to_concat, ".csv", ticker)
+                print(f'Since provided price_csv_dir_to_concat is a directory will now load: {price_csv_dir_to_concat}')
+            except NotADirectoryError:
+                pass  # in that case no change necessary
 
-        # load existing dataframe:
-        price_frame = pd.read_csv(csv_path_to_concat)
-        # set datetime as index:
-        price_frame['date'] = pd.to_datetime(price_frame['date'])
-        price_frame.set_index('date', inplace=True)
-    else:
+            # load existing dataframe:
+            price_frame = pd.read_csv(price_csv_dir_to_concat)
+            # set datetime as index:
+            price_frame['date'] = pd.to_datetime(price_frame['date'])
+            price_frame.set_index('date', inplace=True)
+            
+        else:  # utilize provided dataframe
+            price_frame = price_frame_to_concat
+
+    else:  # don't concat anything
         price_frame = pd.DataFrame()
 
     # query and concat:
@@ -475,7 +776,7 @@ def get_data_from_alphavantage(api_key: str,
     # save data:
     if save_path is not None:
         date_range_string = f"{price_frame.index.min().strftime('%Y-%m-%d')} to {price_frame.index.max().strftime('%Y-%m-%d')}"
-        save_title = filemgmt.file_title(title=f"{ticker} {price_column} price data {date_range_string}",
+        save_title = filemgmt.file_title(title=f"{ticker} price data {date_range_string}",
                                          dtype_suffix=".csv")
         price_frame.to_csv(save_path / save_title)
         return price_frame
