@@ -26,7 +26,8 @@ class RLTradingEnv(gym.Env):
     metadata = {'render.modes': ['human']}
 
     def __init__(self,
-                 price_csv_path: Union[str, Path],
+                 price_csv_path: Union[str, Path] = None,
+                 price_series: pd.Series = None,
                  price_sampling_rate_minutes: int = 1,
                  price_column='close',
                  date_column='date',
@@ -37,7 +38,6 @@ class RLTradingEnv(gym.Env):
                  include_open_leverage_category: bool = False,  # if True, larger than last entry is highest category
                  trading_quantity_per_leverage_factor: float = 1.0,
                  # at 1.0 each trade is sized acccording to total balance / amount of leverage categories
-                 possible_trade_quantities: Literal['all', 'fixed', 'arbitrary'] = 'all',  # used to define action space
                  sell_opposite_direction_if_no_cash: bool = True,
                  sell_all_opposite_products_if_no_cash: bool = True,
                  starting_cash=1000000,
@@ -92,10 +92,13 @@ class RLTradingEnv(gym.Env):
         """
         super(RLTradingEnv, self).__init__()  # initialise base class
 
+        if price_series is None and price_csv_path is None:
+            raise ValueError("Either price_series or price_csv_path must be provided.")
+        self._price_series = price_series
         self._price_csv_path = price_csv_path
         self._price_column = price_column
         self._date_column = date_column
-        self._price_series = None  # placeholder for property
+
         self.price_sampling_rate_minutes = price_sampling_rate_minutes
 
         self.starting_cash = starting_cash
@@ -148,7 +151,7 @@ class RLTradingEnv(gym.Env):
         # todo: remove
         self.shares = 0
 
-    def step(self, action: int, track_portfolio_exposure: bool = True):
+    def step(self, action: int, track_portfolio_exposure: bool = True, start_new_episode_if_finished: bool = True):
         """
         Run one timestep of the environment’s dynamics.
 
@@ -183,8 +186,11 @@ class RLTradingEnv(gym.Env):
         self.current_step += 1
         if self.current_step == self.total_steps:  # if episode is finished
             done = True
-            self.current_episode = self.next_episode()
-            self.init_start_step()
+            if start_new_episode_if_finished:
+                self.current_episode = self.next_episode()
+                self.init_start_step()
+            else:
+                raise ValueError("Episode is finished, but start_new_episode_if_finished is False. Aborting")
         else:
             done = False
 
@@ -208,8 +214,8 @@ class RLTradingEnv(gym.Env):
 
         # get current observation:
         obs = self.current_observation
-        # todo: if tendencies included in observations, include such here
 
+        # todo: if tendencies included in observations, include such here
         # construct info dictionary:
         info = {'Step': self.current_step,
                 'Time': self.current_step_timestamp.strftime('%Y-%m-%d %H:%M:%S'),
@@ -341,16 +347,28 @@ class RLTradingEnv(gym.Env):
 
     def reset(self, seed: int = None) -> (np.ndarray, dict):
         """
-        Reset the environment to the initial state at the start of an episode.
+        Resets the environment for a new episode.
 
-        seed is placeholder currently for stable_baselines3
+        This method resets the internal state of the environment, including cash, shares held,
+        and observation, to prepare it for a new trading episode. It also increments the
+        internal episode counter and provides an option for reproducibility by setting a
+        random seed. An optional status message is returned for informational purposes.
+
+        Parameters
+        ----------
+        seed : int, optional
+            A seed value to initialize the random number generator. Default is None.
 
         Returns
         -------
-        np.ndarray
-            Initial observation after reset, including predictors' outputs, cash, and holdings.
-        dict
-            Info dict of reset action.
+        tuple of (numpy.ndarray, dict)
+            The updated observation array representing the initial state of the environment
+            after reset, and a dictionary containing a status message.
+
+        Notes
+        -----
+        If `verbose` is enabled, the method prints a message stating the start of the new
+        trading episode. This can be useful for monitoring progress during simulations.
         """
         self.init_start_step()
         if self.verbose:  # info statement
@@ -361,21 +379,22 @@ class RLTradingEnv(gym.Env):
 
     def get_predictor_input(self, predictor: LSTMPredictor, custom_timestamp: pd.Timestamp = None) -> pd.Series:
         """
-        Retrieve the time series input for a given predictor at the current step.
-
-        Builds a rolling window view of the price series according to the predictor’s requirements.
+        Calculates a series of sampled prices from the price series based on the rolling window size, sampling rate,
+        and an optional custom timestamp. This data preparation is used for prediction purposes.
 
         Parameters
         ----------
         predictor : LSTMPredictor
-            The predictor instance whose input format is to be generated.
-        custom_timestamp : int, optional
-            Custom timestamp compute predictor input for. If None, uses self.current_step_timestamp
+            The predictor instance that provides configuration values like rolling window size, sampling rate,
+            and predict-before-hour settings.
+        custom_timestamp : pd.Timestamp, optional
+            A custom timestamp to use for slicing the series instead of the current step's timestamp.
 
         Returns
         -------
-        np.ndarray
-            Sampled price window for prediction.
+        pd.Series
+            A series of sampled prices representing the historical price data over a sliding window,
+            adjusted by the sampling rate and prediction hour configuration.
         """
         # infer properties:
         rolling_window_size = predictor.rolling_window_size
@@ -398,6 +417,15 @@ class RLTradingEnv(gym.Env):
                          start_index + (not predict_before_daily_prediction_hour):date_time_int_index + (
                              not predict_before_daily_prediction_hour):int(
                              sampling_rate_minutes / self.price_sampling_rate_minutes)]
+
+        # assertion to check sampling rate and length of sampled_prices matches the predictor's specs
+        assert len(sampled_prices) == rolling_window_size, (
+            f"Expected {rolling_window_size} samples, but got {len(sampled_prices)}"
+        )
+        """assert (sampled_prices.index[1] - sampled_prices.index[0]).total_seconds() / 60 == sampling_rate_minutes, (
+            f"Expected sampling rate of {sampling_rate_minutes} minutes, "
+            f"but got {(sampled_prices.index[1] - sampled_prices.index[0]).total_seconds() / 60} minutes"
+        )"""  # todo: ponder better idea, this doesn't work if e.g. weekends are included
 
         return sampled_prices
 
@@ -439,8 +467,6 @@ class RLTradingEnv(gym.Env):
     @product_set.setter
     def product_set(self, value: KOCertificateSet):
         """ product_set setter. Resets action space. """
-        # todo: rethink whether this should remain mutable
-        self._action_enum = None
         self._product_set = value
 
     @property
@@ -558,7 +584,8 @@ class RLTradingEnv(gym.Env):
         potential_list = np.array([])
         for type, horizon_minutes, potential in zip(self.observation_types, self.observation_horizons_minutes, self.current_observation):
             if type != 'potential': continue
-            potential = potential / horizon_minutes * self.potential_horizon_days * 24 * 60  # # scale per minute and then to per self.potential_horizon_days days
+            # todo: think whether this 24 needs to 14 (business day duration) because observation_horizons_minutes uses such indirectly
+            potential = potential / horizon_minutes * self.potential_horizon_days * 24 * 60  # scale per minute and then to per self.potential_horizon_days days
             potential_list = np.append(potential_list, [potential])
         return np.nanmean(potential_list).item()
 
@@ -569,6 +596,21 @@ class RLTradingEnv(gym.Env):
             self._price_series = preprocessing.read_price_csv(csv_path=self.price_csv_path, date_column=self.date_column,
                                                                 price_column=self.price_column)
         return self._price_series
+    @price_series.setter
+    def price_series(self, value: pd.Series):
+        """ Underlying price series for observations and reward calculations. """
+        try:  # check if all previous datapoints are equal
+            pure_extension_bool = (self._price_series == value.iloc[:len(self._price_series)]).all()
+        except ValueError:
+            pure_extension_bool = False
+
+        # if not sole extension of price series but value change -> reset potential estimates
+        if not pure_extension_bool: self._potential_estimates_dict = None
+        else:
+            if self.verbose: print("Price series has been extended. Previous potential estimates remain unchanged.")
+
+        self._price_series = value
+        self._step_dates_list = self._step_timestamp_list = None
 
     @property
     def price_csv_path(self):
@@ -651,9 +693,13 @@ class RLTradingEnv(gym.Env):
     def current_potential_estimates(self) -> np.ndarray:
         """ Returns potential estimates (relative expected return for next self.potential_horizon_days) per predictor. """
         if self.precalculate_predictor_observations:
-            return self.potential_estimates_dict[self.current_step_timestamp]
-        else:
-            return self.compute_predicted_potentials()
+            try:  # try accessing precalculated estimates
+                return self.potential_estimates_dict[self.current_step_timestamp]
+            except KeyError:  # if dict doesn't include Key, manually calculate potential
+                potential = self.compute_predicted_potentials()
+                self._potential_estimates_dict[self.current_step_timestamp] = potential  # extend dict
+                return potential  # and return manually calculated potential
+        return self.compute_predicted_potentials()
 
     @property
     def current_observation(self):
@@ -939,3 +985,100 @@ class RLTradingEnv(gym.Env):
             plt.savefig(save_fig_directory / filemgmt.file_title("Backtest Result Visualisation", ".png"))
 
         plt.show()
+
+
+####### Auxiliary Backtesting Functions #######
+def env_parametrisation_loop(env_price_sampling_rate_minutes: int,
+                             env_product_set: KOCertificateSet,
+                             env_price_file_path: Path = None,
+                             env_price_series: pd.Series = None,
+                             sort_metric: Literal['Mean', 'Median', 'StdDev', 'Min', 'Max', 'SharpeRatio'] = 'Mean',
+                             print_progress: bool = True,
+                             **param_grid_and_constants):
+    """
+    Backtest multiple hyperparameter settings for RLTradingEnv class.
+
+    Automatically infers parameter grid from provided keyword arguments.
+
+    Provide lists of values for parameters to vary, and single values for constants.
+
+    :param env_price_file_path: Path to the CSV file containing price data.
+    :param env_price_series: Pandas Series containing price data (alternative to env_price_file_path).
+    :param env_price_sampling_rate_minutes: Sampling rate for the price data in minutes.
+    :param env_product_set: Instance of KOCertificateSet for the environment.
+    :param sort_metric: Metric by which to sort the results (e.g., 'Mean', 'StdDev').
+    :param print_progress: Whether to print progress during execution.
+    :param param_grid_and_constants: Additional parameters to vary or keep constant in the environment.
+    :return: DataFrame summarizing results of backtests.
+    """
+    # Validate that at least one price source is provided
+    if env_price_file_path is None and env_price_series is None:
+        raise ValueError("Either 'env_price_file_path' or 'env_price_series' must be provided.")
+
+    # Identify grid parameters (iterables) and constant parameters
+    grid_params = {k: v for k, v in param_grid_and_constants.items() if isinstance(v, list)}
+    constant_params = {k: v for k, v in param_grid_and_constants.items() if k not in grid_params}
+
+    # Result frame with columns for all varying parameters and resulting metrics:
+    columns = list(grid_params.keys()) + ['Mean', 'Median', 'StdDev', 'Min', 'Max', 'SharpeRatio']
+    result_array = []  # Initialize result array
+
+    # All possible ordered pairs of grid parameters:
+    n_configs = len(list(product(*grid_params.values())))
+    for config_ind, config in enumerate(product(*grid_params.values())):
+        if print_progress: print(f"\n--------- Backtest Config {config_ind + 1} / {n_configs} ---------")
+
+        params = dict(zip(grid_params.keys(), config))
+        # Add relevant parameters to env_kwargs
+        env_kwargs = {
+            **params,
+            **constant_params,
+            'verbose': False,
+            'price_sampling_rate_minutes': env_price_sampling_rate_minutes,
+            'product_set': env_product_set,
+        }
+
+        # Include either `env_price_file_path` or `env_price_series` in `env_kwargs`
+        if env_price_series is not None:
+            env_kwargs['price_series'] = env_price_series
+        else:
+            env_kwargs['price_csv_path'] = env_price_file_path
+
+        agent_kwargs = {}
+        try:  # Check for agent-specific parameters in env_kwargs
+            agent_kwargs['abs_potential_threshold_steps'] = env_kwargs['abs_potential_threshold_steps']
+            del env_kwargs['abs_potential_threshold_steps']
+        except KeyError:
+            pass
+
+        try:
+            temp_env = RLTradingEnv(**env_kwargs)
+
+            temp_agent = MultiProductAgent(**agent_kwargs,
+                                           # Infer other parameters from environment
+                                           observation_types=temp_env.observation_types,
+                                           observation_horizons_minute=temp_env.observation_horizons_minutes,
+                                           n_leverage_categories=len(temp_env.leverage_categories),
+                                           include_open_leverage_category=temp_env.include_open_leverage_category,
+                                           potential_treshold_horizon_days=temp_env.potential_horizon_days)
+
+            # Settings and losses
+            _, _, metric_tuple = temp_env.run_env_backtest(temp_agent, mute_environment=True, reset_environment=True,
+                                                           track_portfolio_exposure_every=100000,
+                                                           plot_results=False)
+        except (ValueError, AttributeError) as e:
+            print("Caught an exception:", e)
+            metric_tuple = (np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
+
+        # Convert np values to regular values and concat to result row:
+        metric_list = [metric.item() if isinstance(metric, np.float64) else metric for metric in metric_tuple]
+        result_row = list(config) + metric_list
+        result_array.append(result_row)  # Append to result array
+
+    # Convert to frame and sort eventually:
+    results = pd.DataFrame(result_array, columns=columns)
+    if sort_metric is not None:
+        minimize = sort_metric in ['StdDev']
+        results = results.sort_values(by=sort_metric, ascending=minimize)
+
+    return results
