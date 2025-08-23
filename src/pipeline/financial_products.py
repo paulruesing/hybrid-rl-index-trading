@@ -26,6 +26,7 @@ class KOCertificate:
                  date_base_price_tuple: (str, float) = None,
                  date_base_price_tuple2: (str, float) = None,
                  abs_base_price_change_per_annum: float = 0.02,  # seems to be reasonable
+                 historic_date_future_price_tuple: (str, float) = None,
                  subscription_ratio: float = 1,
                  issue_date: str = None,
                  direction: Literal['long', 'short'] = None,
@@ -89,11 +90,22 @@ class KOCertificate:
 
         self._issue_date = issue_date
         self.risk_premium = risk_premium
-        self._date_base_price_tuple = date_base_price_tuple  # will be accessible through properties with setter for recalculation of base-price series
-        self._date_base_price_tuple2 = date_base_price_tuple2
-        self._base_price_change_per_annum = abs_base_price_change_per_annum
-        self.subscription_ratio = subscription_ratio
         self._direction = direction
+        self.subscription_ratio = subscription_ratio
+        self._base_price_change_per_annum = abs_base_price_change_per_annum
+
+        # initialise properties
+        self._date_base_price_tuple = self._date_base_price_tuple2 = None
+        # then access setters:
+        self.date_base_price_tuple = date_base_price_tuple  # will be accessible through properties with setter for recalculation of base-price series
+        self.date_base_price_tuple2 = date_base_price_tuple2  # set property to inforce datetime
+
+        # infer missing base_price_tuple from historic_date_future_price_tuple (if provided)
+        if historic_date_future_price_tuple is not None:
+            if direction is None: raise AttributeError("direction must be provided for base price inference to prevent infinite recursion loop.")
+            self.get_base_price_from_future_price(historic_date_future_price_tuple[0], historic_date_future_price_tuple[1],
+                                                  use_as_1st_base_price_tuple=date_base_price_tuple is None and date_base_price_tuple2 is not None,
+                                                  use_as_2nd_base_price_tuple=date_base_price_tuple2 is None and date_base_price_tuple is not None,)
 
         # private attributes for properties:
         self._is_ko_series = None
@@ -277,12 +289,14 @@ class KOCertificate:
     @date_base_price_tuple.setter
     def date_base_price_tuple(self, value):
         """ Setting attribute triggers re-computation of base_price_series """
-        if isinstance(value[0], str):
-            date_str = value[0]
-            if len(date_str) <= 10:
-                date_str += " 12:00:00"  # add time suffix if necessary
-                value = (date_str, value[1])
-            value = (datetime.fromisoformat(date_str), value[1])   # convert to timestamp
+        if isinstance(value, tuple):
+            if isinstance(value[0], str):
+                date_str = value[0]
+                if len(date_str) <= 10:
+                    date_str += " 12:00:00"  # add time suffix if necessary
+                    value = (date_str, value[1])
+                value = (datetime.fromisoformat(date_str), value[1])   # convert to timestamp
+        elif value is not None: raise ValueError("value must be a tuple or None")
         self._date_base_price_tuple = value
         self._base_price_series = None
         if self._date_base_price_tuple2 is not None:  # then p.a. recalculation is possible:
@@ -303,12 +317,14 @@ class KOCertificate:
     @date_base_price_tuple2.setter
     def date_base_price_tuple2(self, value):
         """ Setting attribute triggers re-computation of base_price_series """
-        if isinstance(value[0], str):
-            date_str = value[0]
-            if len(date_str) <= 10:
-                date_str += " 12:00:00"  # add time suffix if necessary
-                value = (date_str, value[1])
-            value = (datetime.fromisoformat(date_str), value[1])   # convert to timestamp
+        if isinstance(value, tuple):
+            if isinstance(value[0], str):
+                date_str = value[0]
+                if len(date_str) <= 10:
+                    date_str += " 12:00:00"  # add time suffix if necessary
+                    value = (date_str, value[1])
+                value = (datetime.fromisoformat(date_str), value[1])   # convert to timestamp
+        elif value is not None: raise ValueError("value must be a tuple or None")
         self._date_base_price_tuple2 = value
         self._base_price_series = None
         if self._date_base_price_tuple is not None:  # then p.a. recalculation is possible:
@@ -547,6 +563,32 @@ class KOCertificate:
                   data=price_array,
                   name='Future Price')
 
+    def update_product_details_from_scrape(self, scrape_driver_executable_path: str = "", use_as_2nd_base_price: bool = True):
+        """
+        Updates product details by fetching updated information from an external source using a scraping
+        driver. Specifically, it retrieves the risk premium, subscription ratio, current base price, and
+        issue date for the product, and updates relevant attributes accordingly. Optionally, the current
+        base price can be stored in an alternative attribute for further usage.
+
+        Parameters
+        ----------
+        scrape_driver_executable_path : str, optional
+            Path to the executable file for the web scraping driver, if required for fetching the future
+            information. Defaults to an empty string.
+        use_as_2nd_base_price : bool, optional
+            Flag to determine whether to use the fetched base price to update the secondary base price
+            tuple (`date_base_price_tuple2`), as opposed to the primary one (`date_base_price_tuple`).
+            Defaults to True.
+
+        """
+        self.risk_premium, self.subscription_ratio, current_base_price, self.issue_date = fetch_future_info_from_boerse_fra(self.isin,
+                                                                                                             scrape_driver_executable_path)
+        if use_as_2nd_base_price:
+            self.date_base_price_tuple2 = (datetime.today().strftime('%Y-%m-%d'), current_base_price)
+        else:
+            self.date_base_price_tuple = (datetime.today().strftime('%Y-%m-%d'), current_base_price)
+
+
 
 # auxiliary functions:
 def fetch_future_info_from_boerse_fra(isin: str, driver_executable_path: str):
@@ -583,8 +625,7 @@ def fetch_future_info_from_boerse_fra(isin: str, driver_executable_path: str):
 
     # navigate to product information ("Stammdaten") tab:
     stammdaten_button = driver.find_elements(By.CSS_SELECTOR,
-                                             ".ng-star-inserted .d-flex.flex-nowrap .widget-container-v2 .content-wrapper .ng-star-inserted")[
-        8]  # .find_elements(By.CSS_SELECTOR, ".")
+                                             ".ng-star-inserted .d-flex.flex-nowrap .widget-container-v2 .content-wrapper .ng-star-inserted")[7]  # .find_elements(By.CSS_SELECTOR, ".")
     highlight_element(stammdaten_button)
     stammdaten_button.click()
 
@@ -685,6 +726,77 @@ class KOCertificateSet:
                 highest_leverage=highest_leverage,
                 abs_base_price_change_threshold=abs_base_price_change_threshold)
         # future product instances accessible through property to leverage setter for resetting _date_leverage_frame and _isin_product_dict
+
+    def save_to_csv(self, file_path: str):
+        """
+        Save the current portfolio of ko_certificates to a CSV file.
+
+        Parameters
+        ----------
+        file_path : str
+            The path where the CSV file will be saved.
+        """
+        data = [
+            [
+                product.isin,
+                product.direction,
+                product.issue_date,
+                product.subscription_ratio,
+                product.risk_premium,
+                product.date_base_price_tuple[0],
+                product.date_base_price_tuple[1],
+                product.date_base_price_tuple2[0],
+                product.date_base_price_tuple2[1]
+            ]
+            for product in self.ko_certificates
+        ]
+        columns = [
+            'isin',
+            'direction',
+            'issue_date',
+            'subscription_ratio',
+            'risk_premium',
+            'date_base_price_tuple_0',
+            'date_base_price_tuple_1',
+            'date_base_price_tuple2_0',
+            'date_base_price_tuple2_1'
+        ]
+        df = pd.DataFrame(data=data, columns=columns)
+        df.to_csv(file_path, index=False)
+
+    @classmethod
+    def load_from_csv(cls, file_path: str, underlying_price_series: pd.Series):
+        """
+        Load a portfolio of ko_certificates from a CSV file and instantiate the KOCertificateSet.
+
+        Parameters
+        ----------
+        file_path : str
+            The path to the CSV file to load.
+        underlying_price_series : pd.Series, optional
+            The time series of the underlying asset's price to be assigned to all loaded certificates.
+
+        Returns
+        -------
+        KOCertificateSet
+            An instance of KOCertificateSet with the loaded certificates.
+        """
+        df = pd.read_csv(file_path)
+        ko_certificates = []
+        for _, row in df.iterrows():
+            product = KOCertificate(
+                isin=row['isin'],
+                direction=row['direction'],
+                issue_date=row['issue_date'] if isinstance(row['issue_date'], str) else None,
+                subscription_ratio=row['subscription_ratio'],
+                risk_premium=row['risk_premium'],
+                date_base_price_tuple=(row['date_base_price_tuple_0'], row['date_base_price_tuple_1']),
+                date_base_price_tuple2=(row['date_base_price_tuple2_0'], row['date_base_price_tuple2_1']),
+                underlying_price_series=underlying_price_series,
+                scrape_data_if_possible=False,
+            )
+            ko_certificates.append(product)
+        return cls(ko_certificates=ko_certificates)
 
     def plot_leverages(self, plot_size=(15, 10), leverage_lim=(0, 10), show_legend=False):
         """
@@ -873,14 +985,14 @@ class KOCertificateSet:
                       avail_frame[column].value_counts()[True] / len(avail_frame) * 100, "%")
 
         return avail_frame
-    
+
     def update_all_price_series(self, price_series: pd.Series):
         """ Iterates through all ko_certificates and updates underlying_price_series. """
         for product in self.ko_certificates:
             product.underlying_price_series = price_series
         # reset pre-calculated attributes:
         self._long_leverage_frame = None; self._short_leverage_frame = None; self._price_frame = None
-    
+
     ######### Properties #######
     @property
     def ko_certificates(self) -> [KOCertificate]:
