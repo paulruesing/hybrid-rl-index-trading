@@ -22,266 +22,6 @@ import src.pipeline.pt_metrics as metrics
 from src.pipeline.preprocessing import StockPriceDataManager
 
 
-class PredictorManager:
-    """
-    A class to manage predictor instances by storing their attributes and related file.
-    Automatically infers validation hit-rate, training hit-rate, architecture, rolling window size,
-    forecast horizon size, and preset_type (e.g., B1, C2) from the file title when adding predictors.
-    """
-
-    def __init__(self, data_manager: StockPriceDataManager = None):
-        """
-        Initializes the PredictorManager with an optional data manager.
-
-        Parameters:
-        ----------
-        data_manager : StockPriceDataManager, optional
-            An instance of StockPriceDataManager to handle stock data (default is None).
-        """
-        # Initialize the data manager
-        self.data_manager = data_manager
-        # A dictionary to store predictors with their attributes
-        self.predictors = {}
-        # Preset dictionary for preset_type inference
-        self.preset_type_dict = {
-            'a1': (15, 13, False, 20, 12),
-            'b1': (60, 16, True, 42, 14),
-            'b2': (60, 16, True, 70, 14),
-            'c1': (60 * 24, 16, True, 15, 3),
-            'c2': (60 * 24, 16, True, 40, 5),
-            'd1': (60 * 24 * 7, 16, True, 4 * 4, 2),
-            'd2': (60 * 24 * 7, 16, True, 6 * 4, 3),
-            'd3': (60 * 24 * 7, 16, True, 48, 6),
-        }
-
-    def add_predictor(self, name: str = None, file_path: str = None, architecture: str = None, preset_type: str = None):
-        """
-        Adds a predictor instance and automatically extracts its attributes.
-        If `preset_type` or `architecture` is specified, it overrides the inferred values.
-
-        :param name: (Optional) The name of the predictor. If not provided, it is inferred.
-        :param file_path: The file path of the predictor file.
-        :param architecture: The predictor architecture (e.g., 'LSTM' or 'Transformer'). Overrides inference.
-        :param preset_type: (Optional) The predictor preset_type (e.g., B1, C2). Overrides inference.
-        """
-        if not file_path:
-            raise ValueError("File path must be provided to add a predictor.")
-
-        file_name = Path(file_path).name
-
-        # Extract training hit rate and validation hit rate
-        train_hr, val_hr = self._extract_hit_rates(file_name)
-
-        # Extract rolling window size and forecast horizon size from the file name
-        sr_minutes, rw_size, fh_size = self._extract_sr_rw_fh(file_name)
-
-        # Infer architecture type (e.g., LSTM, Transformer) if not explicitly provided
-        inferred_architecture = architecture if architecture else self._infer_architecture(file_name)
-
-        # Infer preset_type if not explicitly provided
-        inferred_preset_type = preset_type if preset_type else self._infer_preset_type(sr_minutes, rw_size, fh_size)
-
-        # Infer the predictor name
-        inferred_name = self._infer_predictor_name(
-            inferred_architecture,
-            val_hr,
-            inferred_preset_type.lower()
-        )
-
-        # Use the provided name or the inferred name
-        final_name = name if name else inferred_name
-
-        # Add the predictor details to the dictionary
-        if final_name:  # Avoid adding predictors without valid names
-            self.predictors[final_name] = {
-                "name": final_name,
-                "file_path": file_path,
-                "training_hit_rate": train_hr,
-                "validation_hit_rate": val_hr,
-                "sampling_rate_minutes": sr_minutes,
-                "rolling_window_size": rw_size,
-                "forecast_horizon_size": fh_size,
-                "architecture": inferred_architecture,
-                "preset_type": inferred_preset_type.lower(),
-            }
-
-    def add_predictors_from_dir(self, dir_path: str, recursive: bool = False):
-        """
-        Traverses a directory to find all `.pt` files and adds them as predictors.
-
-        :param dir_path: Path to the directory to traverse.
-        :param recursive: Whether to traverse recursively into subdirectories.
-        """
-        dir_path = Path(dir_path)
-
-        if not dir_path.is_dir():
-            raise ValueError(f"{dir_path} is not a valid directory.")
-
-        # Define the pattern to search for `.pt` files
-        pattern = "**/*.pt" if recursive else "*.pt"
-
-        # Traverse the directory and find all .pt files
-        for file_path in dir_path.glob(pattern):
-            self.add_predictor(file_path=str(file_path))
-
-    def get_predictor(self, name: str):
-        """
-        Retrieves a predictor by its name.
-
-        :param name: The name of the predictor.
-        :return: The predictor dictionary or None if not found.
-        """
-        return self.predictors.get(name)
-
-    def get_predictors_by_type_sorted(self, architecture: str = None, preset_type: str = None):
-        """
-        Retrieves all predictors filtered by architecture and preset_type, sorted by validation hit rate.
-
-        :param architecture: (Optional) Architecture type, e.g. 'LSTM', 'Transformer'.
-        :param preset_type: (Optional) preset-type, e.g. 'b1', 'c2'.
-        :return: A list of predictor dictionaries that match the given filters, sorted by validation hit rate (descending).
-        """
-        # Filter predictors
-        filtered = [
-            predictor for predictor in self.predictors.values()
-            if (not architecture or predictor['architecture'] == architecture)
-               and (not preset_type or predictor['preset_type'] == preset_type.lower())
-        ]
-        # Sort predictors by validation hit rate in descending order
-        return sorted(filtered, key=lambda x: x["validation_hit_rate"], reverse=True)
-
-    def instantiate_predictor(self, name: str) -> NNPredictor:
-        """
-        Instantiates a predictor object based on the given name by retrieving its configuration and initializing the corresponding architecture.
-
-        Parameters
-        ----------
-        name : str
-            The identifier of the predictor to be instantiated.
-
-        Returns
-        -------
-        NNPredictor
-            An instance of the appropriate predictor class (LSTMPredictor or TransformerPredictor) initialized with the required configuration.
-
-        Raises
-        ------
-        ValueError
-            If self.data_manager is None, if the predictor name is not found, or if an invalid preset category or architecture is provided.
-
-        Notes
-        -----
-        The preset category determines the time resolution to use for price series data, categorized by 'a', 'b', 'c', or 'd'. Only 'LSTM' and 'Transformer' architectures are supported.
-        """
-        if self.data_manager is None: raise ValueError(
-            "self.data_manager required for automatic predictor instantiation.")
-
-        # infer properties:
-        predictor_dict = self.get_predictor(name)
-        if predictor_dict is None:
-            raise ValueError(f"Predictor {name} not found.")
-        architecture = predictor_dict['architecture']
-        preset_category = predictor_dict['preset_type'][0]  # first letter indicates time resolution
-
-        if preset_category == 'a':
-            price_series = self.data_manager.a_interp_prices
-        elif preset_category == 'b':
-            price_series = self.data_manager.b_interp_prices
-        elif preset_category == 'c':
-            price_series = self.data_manager.c_interp_prices
-        elif preset_category == 'd':
-            price_series = self.data_manager.d_interp_prices
-        else:
-            raise ValueError(f"Invalid preset category: {preset_category}, has to be one of 'a', 'b', 'c' or 'd'.")
-
-        if architecture == 'LSTM':
-            return LSTMPredictor(model_load_file_path=predictor_dict['file_path'],
-                                 price_series=price_series,
-                                 preset_type=predictor_dict['preset_type'],
-                                 name=name,
-                                 )
-        elif architecture == 'Transformer':
-            return TransformerPredictor(model_load_file_path=predictor_dict['file_path'],
-                                        price_series=price_series,
-                                        preset_type=predictor_dict['preset_type'],
-                                        name=name,
-                                        )
-        else:
-            raise ValueError(f"Invalid architecture: {architecture}, has to be one of 'LSTM' or 'Transformer'.")
-
-    def _infer_predictor_name(self, architecture: str, val_hr: float, preset_type: str):
-        """
-        Infers the name of the predictor by combining its type and other details.
-
-        :param architecture: The predictor architecture (e.g., LSTM, Transformer).
-        :param val_hr: Validation hit rate.
-        :param preset_type: The preset_type suffix (e.g., "b1", "c2").
-        :return: Inferred name for the predictor.
-        """
-        name_components = [architecture]
-        if preset_type:
-            name_components.append(preset_type.lower())
-        if val_hr:
-            name_components.append(f"ValHR{val_hr:.4f}")
-        return "_".join(name_components)
-
-    @staticmethod
-    def _extract_hit_rates(file_name: str):
-        """
-        Extracts training hit-rate and validation hit-rate from the file name.
-
-        :param file_name: The file name of the predictor.
-        :return: A tuple containing (training_hit_rate, validation_hit_rate).
-        """
-        match = re.search(r"TrainHR([0-9.]+)\s+ValHR([0-9.]+)(?:\s|$|\.)", file_name)
-        if match:
-            train_hr = float(match.group(1))
-            val_hr = float(match.group(2))
-            return train_hr, val_hr
-        return None, None
-
-    @staticmethod
-    def _extract_sr_rw_fh(file_name: str):
-        """
-        Extracts sampling rate (SR), rolling window size (RW) and forecast horizon size (FH) from the file name.
-
-        :param file_name: The file name of the predictor.
-        :return: A tuple (sampling_rate_minutes, rolling_window_size, forecast_horizon_size).
-        """
-        match = re.search(r"SR(\d+)\s*RW(\d+)\s*FH(\d+)", file_name)
-        if match:
-            sr_minutes = int(match.group(1))
-            rw_size = int(match.group(2))
-            fh_size = int(match.group(3))
-            return sr_minutes, rw_size, fh_size
-        return None, None, None
-
-    @staticmethod
-    def _infer_architecture(file_name: str):
-        """
-        Infers the architecture (e.g., LSTM, Transformer) from the file name.
-
-        :param file_name: Name of the file, which may include the predictor architecture keyword.
-        :return: The inferred architecture (e.g., LSTM, Transformer) or 'Unknown'.
-        """
-        if "LSTM" in file_name.upper():
-            return "LSTM"
-        elif "TRANSFORMER" in file_name.upper():
-            return "Transformer"
-        return "Unknown"
-
-    def _infer_preset_type(self, sr_minutes: int = None, rw_size: int = None, fh_size: int = None):
-        """
-        Infers the predictor preset_type (e.g., B1, C2) using sampling rate minutes, rolling window size and forecast horizon size.
-        """
-        if sr_minutes is not None and rw_size is not None and fh_size is not None:
-            for preset_type, (
-                    preset_sr, daily_hour, predict_before, preset_rw, preset_fh) in self.preset_type_dict.items():
-                if sr_minutes == preset_sr and rw_size == preset_rw and fh_size == preset_fh:
-                    return preset_type
-        return None
-
-
 class TimeSeriesDataset(Dataset):
     """ Time-series dataset class based on torch.utils.data.Dataset compatible torch.utils.data.DataLoader """
     def __init__(self,
@@ -942,14 +682,14 @@ class NNPredictor:
                 'b1': (60, 16, True, 42, 14),
                 'b2': (60, 16, True, 70, 14),
 
-                # 1 day sampling
-                'c1': (60 * 24, 16, True, 15, 3),
-                'c2': (60 * 24, 16, True, 40, 5),
+                # 1 day sampling (with 14h business day duration)
+                'c1': (60 * 14, 16, True, 15, 3),
+                'c2': (60 * 14, 16, True, 40, 5),
 
-                # 1 week sampling:
-                'd1': (60 * 24 * 7, 16, True, 4 * 4, 2),
-                'd2': (60 * 24 * 7, 16, True, 6 * 4, 3),
-                'd3': (60 * 24 * 7, 16, True, 48, 6),
+                # 1 week sampling (with 5d business week duration)
+                'd1': (60 * 14 * 5, 16, True, 4 * 4, 2),
+                'd2': (60 * 14 * 5, 16, True, 6 * 4, 3),
+                'd3': (60 * 14 * 5, 16, True, 48, 6),
             }
             self._sampling_rate_minutes, self._daily_prediction_hour, self._predict_before_daily_prediction_hour, self._rolling_window_size, self._forecast_horizon = preset_type_dict[preset_type.lower()]
             self._preset_type = preset_type
@@ -1009,7 +749,7 @@ class NNPredictor:
     def describe(self):
         """ Should be overwritten through inheriting classes. """
         intro_str = "------------------- NNPredictor Instance -------------------\n\n"
-        data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /24} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- randomise validation data every: {self.randomise_validation_data_every}th epoch\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
+        data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /14} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- randomise validation data every: {self.randomise_validation_data_every}th epoch\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
         if self.n_train_epochs is not None:
             training_str = f"Training Attributes:\n- final training loss: {self.loss_train}\n- final validation loss: {self.loss_val}\n- final training hit-rate: {self.hit_rate_train}\n- final validation hit-rate: {self.hit_rate_val}"
         else:
@@ -1664,7 +1404,7 @@ class LSTMPredictor(NNPredictor):
     # if no name is provided, this method is called as str-representation:
     def describe(self):
         intro_str = "------------------- LSTMPredictor Instance -------------------\n\n"
-        data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /24} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- randomise validation data every: {self.randomise_validation_data_every}th epoch\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
+        data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /14} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- randomise validation data every: {self.randomise_validation_data_every}th epoch\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
         model_str = f"Model Attributes:\n- hidden LSTM layers: {self.hidden_lstm_layer_size}\n- number of LSTM layers: {self.n_lstm_layers}\n- pre LSTM fully connected layer: {self.use_pre_lstm_fc_layer}\n\n"
         if self.n_train_epochs is not None:
             training_str = f"Training Attributes:\n- final training loss: {self.loss_train}\n- final validation loss: {self.loss_val}\n- final training hit-rate: {self.hit_rate_train}\n- final validation hit-rate: {self.hit_rate_val}"
@@ -1883,7 +1623,7 @@ class TransformerPredictor(NNPredictor):
     # if no name is provided, this method is called as str-representation:
     def describe(self):
         intro_str = "------------------- TransformerPredictor Instance -------------------\n\n"
-        data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /24} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- randomise validation data every: {self.randomise_validation_data_every}th epoch\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
+        data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /14} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- randomise validation data every: {self.randomise_validation_data_every}th epoch\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
         model_str = f"Model Attributes:\n- hidden transformer layer size: {self.hidden_transformer_layer_size}\n- number of transformer layers: {self.n_transformer_layers}\n- number of transformer heads: {self.n_transformer_heads}\n- use learnable start token: {self.use_start_token}\n\n"
         if self.n_train_epochs is not None:
             training_str = f"Training Attributes:\n- final training loss: {self.loss_train}\n- final validation loss: {self.loss_val}\n- final training hit-rate: {self.hit_rate_train}\n- final validation hit-rate: {self.hit_rate_val}"
@@ -2014,6 +1754,336 @@ class TransformerPredictor(NNPredictor):
             dtype_suffix=".pt")
         if self.verbose: print(f"Saving Transformer model to {save_path}/{save_title}")
         torch.save(self.transformer_model, save_path / save_title)
+
+class PredictorManager:
+    """
+    A class to manage predictor instances by storing their attributes and related file.
+    Automatically infers validation hit-rate, training hit-rate, architecture, rolling window size,
+    forecast horizon size, and preset_type (e.g., B1, C2) from the file title when adding predictors.
+    """
+
+    def __init__(self, data_manager: StockPriceDataManager = None):
+        """
+        Initializes the PredictorManager with an optional data manager.
+
+        Parameters:
+        ----------
+        data_manager : StockPriceDataManager, optional
+            An instance of StockPriceDataManager to handle stock data (default is None).
+        """
+        # Initialize the data manager
+        self.data_manager = data_manager
+        # A dictionary to store predictors with their attributes
+        self.predictors = {}
+        # Preset dictionary for preset_type inference
+        self.preset_type_dict = {  # sampling_r_min, pred_h, pred_before_h, rw_size, fh_size
+            'a1': (15, 13, False, 20, 12),
+            'b1': (60, 16, True, 42, 14),
+            'b2': (60, 16, True, 70, 14),
+            'c1': (60 * 14, 16, True, 15, 3),  # 14h business day duration (8-22)
+            'c2': (60 * 14, 16, True, 40, 5),
+            'd1': (60 * 14 * 5, 16, True, 4 * 4, 2),  # 5d business week duration (mo-fr)
+            'd2': (60 * 14 * 5, 16, True, 6 * 4, 3),
+            'd3': (60 * 14 * 5, 16, True, 48, 6),
+        }
+
+    def describe_preset_types(self):
+        """
+        Prints a formatted description of each preset based on self.preset_type_dict.
+
+        Each preset includes:
+        - Sampling Rate (seconds, minutes, hours, or days)
+        - Rolling Window
+        - Forecast Horizon
+        - Prediction Hour
+        """
+        print("Preset Details:\n")
+        for preset_name, (
+        sampling_rate, prediction_hour, _, rolling_window, forecast_horizon) in self.preset_type_dict.items():
+            # Scale sampling rate to appropriate time units
+            if sampling_rate < 60:
+                rate_value = sampling_rate
+                rate_unit = "minute(s)"
+            elif sampling_rate < 60 * 14:  # 14h business day duration (8-22)
+                rate_value = sampling_rate // 60
+                rate_unit = "hour(s)"
+            elif sampling_rate < 60 * 14 * 5:  # 5d business week duration (mo.-fr.)
+                rate_value = sampling_rate // (60 * 14)
+                rate_unit = "day(s)"
+            else:
+                rate_value = sampling_rate // (60 * 14 * 5)
+                rate_unit = "week(s)"
+
+            # Formatted output for the preset
+            print(f"Preset '{preset_name}':")
+            print(f"  - Sampling Rate: {rate_value} {rate_unit}")
+            print(f"  - Rolling Window Size: {rolling_window * rate_value} {rate_unit}")
+            print(f"  - Forecast Horizon: {forecast_horizon * rate_value} {rate_unit}")
+            print(f"  - Prediction Time: {prediction_hour}.00")
+            print("-" * 50)
+
+    def add_predictor(self, name: str = None, file_path: str = None, architecture: str = None, preset_type: str = None):
+        """
+        Adds a predictor instance and automatically extracts its attributes.
+        If `preset_type` or `architecture` is specified, it overrides the inferred values.
+
+        :param name: (Optional) The name of the predictor. If not provided, it is inferred.
+        :param file_path: The file path of the predictor file.
+        :param architecture: The predictor architecture (e.g., 'LSTM' or 'Transformer'). Overrides inference.
+        :param preset_type: (Optional) The predictor preset_type (e.g., B1, C2). Overrides inference.
+        """
+        if not file_path:
+            raise ValueError("File path must be provided to add a predictor.")
+
+        file_name = Path(file_path).name
+
+        # Extract training hit rate and validation hit rate
+        train_hr, val_hr = self._extract_hit_rates(file_name)
+
+        # Extract rolling window size and forecast horizon size from the file name
+        sr_minutes, rw_size, fh_size = self._extract_sr_rw_fh(file_name)
+
+        # Infer architecture type (e.g., LSTM, Transformer) if not explicitly provided
+        inferred_architecture = architecture if architecture else self._infer_architecture(file_name)
+
+        # Infer preset_type if not explicitly provided
+        inferred_preset_type = preset_type if preset_type else self._infer_preset_type(sr_minutes, rw_size, fh_size)
+
+        # Infer the predictor name
+        inferred_name = self._infer_predictor_name(
+            inferred_architecture,
+            val_hr,
+            inferred_preset_type.lower()
+        )
+
+        # Use the provided name or the inferred name
+        final_name = name if name else inferred_name
+
+        # Add the predictor details to the dictionary
+        if final_name:  # Avoid adding predictors without valid names
+            self.predictors[final_name] = {
+                "name": final_name,
+                "file_path": file_path,
+                "training_hit_rate": train_hr,
+                "validation_hit_rate": val_hr,
+                "sampling_rate_minutes": sr_minutes,
+                "rolling_window_size": rw_size,
+                "forecast_horizon_size": fh_size,
+                "architecture": inferred_architecture,
+                "preset_type": inferred_preset_type.lower(),
+            }
+
+    def add_predictors_from_dir(self, dir_path: str, recursive: bool = False):
+        """
+        Traverses a directory to find all `.pt` files and adds them as predictors.
+
+        :param dir_path: Path to the directory to traverse.
+        :param recursive: Whether to traverse recursively into subdirectories.
+        """
+        dir_path = Path(dir_path)
+
+        if not dir_path.is_dir():
+            raise ValueError(f"{dir_path} is not a valid directory.")
+
+        # Define the pattern to search for `.pt` files
+        pattern = "**/*.pt" if recursive else "*.pt"
+
+        # Traverse the directory and find all .pt files
+        for file_path in dir_path.glob(pattern):
+            self.add_predictor(file_path=str(file_path))
+
+    def get_predictor(self, name: str) -> dict:
+        """
+        Retrieves a predictor by its name.
+
+        :param name: The name of the predictor.
+        :return: The predictor dictionary or None if not found.
+        """
+        return self.predictors.get(name)
+
+    def get_predictors_by_type_sorted(self, architecture: str = None, preset_type: str = None,
+                                      return_instances: bool = True, k_best: int = None) -> Union[list[dict], list[NNPredictor]]:
+        """
+        Retrieve and sort predictors based on filtering criteria, returning either a list of
+        instances or dictionaries.
+
+        This method filters available predictors based on the specified architecture and preset type.
+        The filtered predictors are sorted by their validation hit rate in descending order. If requested,
+        it instantiates the predictors and returns a list of instances; otherwise, it returns a list of
+        dictionaries containing the predictor details.
+
+        Parameters
+        ----------
+        architecture : str, optional
+            The architecture type to filter the predictors. If None, predictors of all architectures
+            are considered.
+        preset_type : str, optional
+            The preset type to filter the predictors. If None, predictors of all preset types are
+            considered. The provided value is case-insensitively matched against predictors.
+        return_instances : bool, default=True
+            If True, the method returns a list of instantiated predictor objects. If False, it returns
+            a list of dictionaries containing predictor details.
+        k_best : int, optional
+            The number of top predictors to return after sorting. If None, all filtered predictors are
+            returned.
+
+        Returns
+        -------
+        list of dict or list of NNPredictor
+            A list of either dictionaries representing the details of predictors or a list of instantiated
+            predictors, depending on the value of `return_instances`.
+        """
+        # Filter predictors
+        filtered = [
+            predictor for predictor in self.predictors.values()
+            if (not architecture or predictor['architecture'] == architecture)
+               and (not preset_type or predictor['preset_type'] == preset_type.lower())
+        ]
+        # Sort predictors by validation hit rate in descending order
+        pred_dict_list = sorted(filtered, key=lambda x: x["validation_hit_rate"], reverse=True)
+        if k_best is not None: pred_dict_list = pred_dict_list[:k_best]
+
+        # either instantiate predictors and return list or return dict
+        if return_instances:
+            pred_list = []
+            for pred_dict in pred_dict_list:
+                pred_list.append(self.instantiate_predictor(pred_dict['name']))
+            return pred_list
+        else:
+            return sorted(filtered, key=lambda x: x["validation_hit_rate"], reverse=True)
+
+    def instantiate_predictor(self, name: str) -> NNPredictor:
+        """
+        Instantiates a predictor object based on the given name by retrieving its configuration and initializing the corresponding architecture.
+
+        Parameters
+        ----------
+        name : str
+            The identifier of the predictor to be instantiated.
+
+        Returns
+        -------
+        NNPredictor
+            An instance of the appropriate predictor class (LSTMPredictor or TransformerPredictor) initialized with the required configuration.
+
+        Raises
+        ------
+        ValueError
+            If self.data_manager is None, if the predictor name is not found, or if an invalid preset category or architecture is provided.
+
+        Notes
+        -----
+        The preset category determines the time resolution to use for price series data, categorized by 'a', 'b', 'c', or 'd'. Only 'LSTM' and 'Transformer' architectures are supported.
+        """
+        if self.data_manager is None: raise ValueError(
+            "self.data_manager required for automatic predictor instantiation.")
+
+        # infer properties:
+        predictor_dict = self.get_predictor(name)
+        if predictor_dict is None:
+            raise ValueError(f"Predictor {name} not found.")
+        architecture = predictor_dict['architecture']
+        preset_category = predictor_dict['preset_type'][0]  # first letter indicates time resolution
+
+        if preset_category == 'a':
+            price_series = self.data_manager.a_interp_prices
+        elif preset_category == 'b':
+            price_series = self.data_manager.b_interp_prices
+        elif preset_category == 'c':
+            price_series = self.data_manager.c_interp_prices
+        elif preset_category == 'd':
+            price_series = self.data_manager.d_interp_prices
+        else:
+            raise ValueError(f"Invalid preset category: {preset_category}, has to be one of 'a', 'b', 'c' or 'd'.")
+
+        if architecture == 'LSTM':
+            return LSTMPredictor(model_load_file_path=predictor_dict['file_path'],
+                                 price_series=price_series,
+                                 preset_type=predictor_dict['preset_type'],
+                                 name=name,
+                                 verbose=False,
+                                 )
+        elif architecture == 'Transformer':
+            return TransformerPredictor(model_load_file_path=predictor_dict['file_path'],
+                                        price_series=price_series,
+                                        preset_type=predictor_dict['preset_type'],
+                                        name=name,
+                                        verbose=False,
+                                        )
+        else:
+            raise ValueError(f"Invalid architecture: {architecture}, has to be one of 'LSTM' or 'Transformer'.")
+
+    def _infer_predictor_name(self, architecture: str, val_hr: float, preset_type: str):
+        """
+        Infers the name of the predictor by combining its type and other details.
+
+        :param architecture: The predictor architecture (e.g., LSTM, Transformer).
+        :param val_hr: Validation hit rate.
+        :param preset_type: The preset_type suffix (e.g., "b1", "c2").
+        :return: Inferred name for the predictor.
+        """
+        name_components = [architecture]
+        if preset_type:
+            name_components.append(preset_type.lower())
+        if val_hr:
+            name_components.append(f"ValHR{val_hr:.4f}")
+        return "_".join(name_components)
+
+    @staticmethod
+    def _extract_hit_rates(file_name: str):
+        """
+        Extracts training hit-rate and validation hit-rate from the file name.
+
+        :param file_name: The file name of the predictor.
+        :return: A tuple containing (training_hit_rate, validation_hit_rate).
+        """
+        match = re.search(r"TrainHR([0-9.]+)\s+ValHR([0-9.]+)(?:\s|$|\.)", file_name)
+        if match:
+            train_hr = float(match.group(1))
+            val_hr = float(match.group(2))
+            return train_hr, val_hr
+        return None, None
+
+    @staticmethod
+    def _extract_sr_rw_fh(file_name: str):
+        """
+        Extracts sampling rate (SR), rolling window size (RW) and forecast horizon size (FH) from the file name.
+
+        :param file_name: The file name of the predictor.
+        :return: A tuple (sampling_rate_minutes, rolling_window_size, forecast_horizon_size).
+        """
+        match = re.search(r"SR(\d+)\s*RW(\d+)\s*FH(\d+)", file_name)
+        if match:
+            sr_minutes = int(match.group(1))
+            rw_size = int(match.group(2))
+            fh_size = int(match.group(3))
+            return sr_minutes, rw_size, fh_size
+        return None, None, None
+
+    @staticmethod
+    def _infer_architecture(file_name: str):
+        """
+        Infers the architecture (e.g., LSTM, Transformer) from the file name.
+
+        :param file_name: Name of the file, which may include the predictor architecture keyword.
+        :return: The inferred architecture (e.g., LSTM, Transformer) or 'Unknown'.
+        """
+        if "LSTM" in file_name.upper():
+            return "LSTM"
+        elif "TRANSFORMER" in file_name.upper():
+            return "Transformer"
+        return "Unknown"
+
+    def _infer_preset_type(self, sr_minutes: int = None, rw_size: int = None, fh_size: int = None):
+        """
+        Infers the predictor preset_type (e.g., B1, C2) using sampling rate minutes, rolling window size and forecast horizon size.
+        """
+        if sr_minutes is not None and rw_size is not None and fh_size is not None:
+            for preset_type, (
+                    preset_sr, daily_hour, predict_before, preset_rw, preset_fh) in self.preset_type_dict.items():
+                if sr_minutes == preset_sr and rw_size == preset_rw and fh_size == preset_fh:
+                    return preset_type
+        return None
 
 
 ######################### Predictor parametrisation auxiliary fucntions #########################
