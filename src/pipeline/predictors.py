@@ -1762,7 +1762,7 @@ class PredictorManager:
     forecast horizon size, and preset_type (e.g., B1, C2) from the file title when adding predictors.
     """
 
-    def __init__(self, data_manager: StockPriceDataManager = None):
+    def __init__(self, data_manager: StockPriceDataManager = None, initialisation_dir: Path = None, **initialisation_kwargs):
         """
         Initializes the PredictorManager with an optional data manager.
 
@@ -1786,6 +1786,10 @@ class PredictorManager:
             'd2': (60 * 14 * 5, 16, True, 6 * 4, 3),
             'd3': (60 * 14 * 5, 16, True, 48, 6),
         }
+
+        # add predictors from directory if provided:
+        if initialisation_dir is not None:
+            self.add_predictors_from_dir(initialisation_dir, **initialisation_kwargs)
 
     def describe_preset_types(self):
         """
@@ -1873,7 +1877,7 @@ class PredictorManager:
                 "preset_type": inferred_preset_type.lower(),
             }
 
-    def add_predictors_from_dir(self, dir_path: str, recursive: bool = False):
+    def add_predictors_from_dir(self, dir_path: str, recursive: bool = True):
         """
         Traverses a directory to find all `.pt` files and adds them as predictors.
 
