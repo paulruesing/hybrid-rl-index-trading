@@ -10,6 +10,7 @@ from tqdm import tqdm
 from alpha_vantage.timeseries import TimeSeries
 
 import src.utils.file_management as filemgmt
+import src.pipeline.web_interaction as webinteraction
 
 
 class Normaliser():
@@ -109,10 +110,15 @@ class StockPriceDataManager:
     """
 
     def __init__(self,
-                 ticker_symbol: str,
                  download_dir: Path,
                  interpolated_files_dir: Path,
                  alpha_vantage_api_key: str,
+
+                 ticker_symbol: str = 'DAX',
+                 scrape_url_comdirect: str = "https://www.comdirect.de/inf/fonds/detail/chart.html?ID_NOTATION=115802659&",
+                 include_scraped_downloads: bool = False,  # if True -> adds today's scraped data to downloaded_prices
+                 scrape_raw_download_dir: Path = None,
+
                  env_sampling_rate_minutes: Literal[15, 60, 1440] = 15,
                  price_column: Literal['low', 'high', 'open', 'close'] = 'close',
                  is_etf_price_data: bool = False,
@@ -122,6 +128,13 @@ class StockPriceDataManager:
                  custom_start_h_min_tuple: (int, int) = (16, 0),
                  ):
         self.ticker_symbol = ticker_symbol
+        self.scrape_url_comdirect = scrape_url_comdirect
+        self.include_scraped_downloads = include_scraped_downloads
+        if include_scraped_downloads:
+            if scrape_raw_download_dir is None:
+                raise ValueError("If include_scraped_downloads is True, scrape_raw_download_dir must be provided.")
+        self.scrape_raw_download_dir = scrape_raw_download_dir
+
         self.download_dir = download_dir
         self.interpolated_files_dir = interpolated_files_dir
         self._alpha_vantage_api_key = alpha_vantage_api_key
@@ -270,10 +283,26 @@ class StockPriceDataManager:
 
     @property
     def downloaded_prices(self) -> pd.Series:
-        """ Most recent price download series according to self.price_column. """
+        """
+        Most recent price download series according to self.price_column.
+        Includes scraped prices if self.include_scraped_prices is True.
+        """
         alpha_vantage_column_renaming = {'1. open': 'open', '2. high': 'high', '3. low': 'low', '4. close': 'close'}
         price_frame = self.downloaded_price_frame.rename(columns=alpha_vantage_column_renaming)
-        return price_frame[self.price_column]
+        price_series = price_frame[self.price_column]
+
+        if self.include_scraped_downloads:
+            scrape_series = webinteraction.fetch_price_from_comdirect(raw_download_dir=self.scrape_raw_download_dir,
+                                                                      url=self.scrape_url_comdirect,
+                                                                      )
+            # format scraped series:
+            scrape_series.name = self.price_column; scrape_series.index.name = 'date'
+
+            # concatenate:
+            price_series = pd.concat([price_series, scrape_series])
+            price_series = price_series[~price_series.index.duplicated(keep='first')]  # drop duplicate indices
+
+        return price_series
 
     ## other:
     @property
@@ -306,9 +335,10 @@ class StockPriceDataManager:
 
     def update_interpolated_data(self):
         """ Interpolate and sample all price files based on most recent data download. """
+        raw_price_series = self.downloaded_prices
         for sampling_rate_str in [self.a_sampling_rate_str, self.b_sampling_rate_str, self.c_sampling_rate_str,
                                   self.d_sampling_rate_str]:
-            time_interpolation_new_sampling_rate(price_series=self.downloaded_prices,
+            time_interpolation_new_sampling_rate(price_series=raw_price_series,
                                                  datetime_column='date',
                                                  new_sampling_rate=sampling_rate_str,
                                                  moving_average_window_size=None,
