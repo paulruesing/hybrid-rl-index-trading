@@ -8,17 +8,47 @@ from typing import Literal, Union
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
-import src.utils.str_conversion as strconv
-
+import src.pipeline.web_interaction as webint
 
 class KOCertificate:
-    """ Models the price evolution of a future financial product. """
+    """
+    KOCertificate Class
+
+    The KOCertificate class models a future financial product's price evolution
+    based on an underlying asset's time series. It uses base price changes,
+    historical data, and additional parameters like risk premium and subscription
+    ratio to estimate a financial product's pricing behavior.
+
+    The class allows for product data to be automatically scraped using an ISIN
+    identifier. It computes key attributes like intrinsic value, base price series,
+    and a product's final value. Base prices can be inferred from calibration points
+    or historical future prices. Directional strategies ("long" or "short") influence
+    calculations, and multiple options are provided for overriding parameter values.
+
+    Attributes
+    ----------
+    isin : str
+        ISIN code used to identify a product for data scraping, if applicable.
+    risk_premium : float
+        A constant premium that adjusts intrinsic product value calculations.
+    subscription_ratio : float
+        A factor linking the changes in the underlying asset to the product's value.
+    issue_date : str, optional
+        The date from which the underlying price series is valid, filtering earlier data.
+    date_base_price_tuple : (str, float)
+        Tuple containing a date and corresponding base price for base price computations.
+    date_base_price_tuple2 : (str, float), optional
+        A second date and base price tuple used for interpolation purposes.
+    base_price_change_per_annum : float, default 0.02
+        A constant rate of base price increase used for base price approximation.
+    direction : {"long", "short"}, optional
+        The type of directional product strategy; inferred if not provided.
+    scrape_data_if_possible : bool, default True
+        Determines whether product data should be scraped using the provided ISIN.
+    scrape_driver_executable_path : str, optional
+        System path to the WebDriver executable needed for scraping product data.
+    """
     def __init__(self,
                  underlying_price_series: pd.Series,
                  isin: str = None,
@@ -34,44 +64,41 @@ class KOCertificate:
                  scrape_driver_executable_path: str = "",
                  ):
         """
-        Class for modeling the price evolution of a future financial product
-        based on an underlying asset, accounting for base price changes and
-        financing costs over time.
-
-        Product information can be automatically scraped by providing an ISIN
-        and keeping scrape_data_if_possible at True.
-
-        The class computes a base price series, intrinsic value, and final
-        price of a future product, given a time series of underlying prices
-        and one or two calibration points. If two base prices or a historical
-        future price are provided, it estimates the time-varying base price
-        through linear interpolation.
+        Class to process underlying price array and manage associated financial data for calculations like
+        base price and intrinsic value series. This provides mechanisms to handle duplication in the
+        price index, fetch external data if required, and infer additional key financial information based
+        on provided or scraped data.
 
         Parameters
         ----------
         underlying_price_series : pd.Series
-            Time series of the underlying asset prices. Must have a DateTimeIndex.
-        isin : str
-            Can be provided to scrape the product's data risk_premium, subscription_ratio, date_base_price_tuple and issue_date. Will overwrite such.
-        risk_premium : float
-            Constant premium added to the intrinsic value to compute the product price.
-        date_base_price_tuple : (str, float)
-            A tuple containing a date and the corresponding base price.
-        date_base_price_tuple2 : (str, float), optional
-            A second base price tuple (date and value) for interpolation.
-        base_price_change_per_annum : float, default is 0.02
-            Annual base price increase used for base price estimation if date_base_price_tuple2 not provided.
-        subscription_ratio : float, default 1
-            Scaling factor that links changes in the underlying asset to the
-            product's intrinsic value.
+            A pandas Series of underlying prices with a datetime index or an equivalent structure
+            convertible into a Series.
+        isin : str, optional
+            The International Securities Identification Number (ISIN) of the financial instrument. If
+            provided, relevant data may be fetched through web scraping.
+        risk_premium : float, optional
+            A risk premium percentage to be applied. Defaults to 0.
+        date_base_price_tuple : tuple of (str, float), optional
+            Tuple containing the date (in string format) and corresponding base price.
+        date_base_price_tuple2 : tuple of (str, float), optional
+            Alternative tuple containing another date and corresponding base price.
+        abs_base_price_change_per_annum : float, optional
+            Absolute base price change per annum as a percentage. Defaults to 0.02 (2% presumed reasonable).
+        historic_date_future_price_tuple : tuple of (str, float), optional
+            Tuple containing a date and a future price to infer missing base price tuples.
+        subscription_ratio : float, optional
+            The subscription ratio, representing the number of underlying items each derivative
+            represents. Defaults to 1.
         issue_date : str, optional
-            If provided, trims all data before this date in the underlying series.
-        direction : "long" or "short", optional
-            Fixes product type. If not provided, such property (direction) is inferred from last base and underlying price.
-        scrape_data_if_possible : bool, default = True
-            If true, product properties will be scraped from boerse-frankfurt.de through the provided ISIN.
+            The date of issue of the financial instrument.
+        direction : {'long', 'short'}, optional
+            Direction of the trade, either 'long' or 'short'.
+        scrape_data_if_possible : bool, optional
+            Flag indicating whether to scrape financial data from online sources if an ISIN is provided.
+            Defaults to True.
         scrape_driver_executable_path : str, optional
-            Path to executable driver for Selenium product info scrape. Often not necessary, system can try to automatically locate it.
+            Path to the executable of a web driver for web scraping when needed.
         """
         # convert underlying price array to pd.Series with DatetimeIndex:
         self._underlying_price_series = underlying_price_series if isinstance(underlying_price_series,
@@ -83,7 +110,7 @@ class KOCertificate:
 
         # if provided, overwrite all parameters through web scrape:
         if isin is not None and scrape_data_if_possible:
-            risk_premium, subscription_ratio, current_base_price, issue_date = fetch_future_info_from_boerse_fra(isin,
+            risk_premium, subscription_ratio, current_base_price, issue_date = webint.fetch_future_info_from_boerse_fra(isin,
                                                                                                                  scrape_driver_executable_path)
             date_base_price_tuple = (datetime.today().strftime('%Y-%m-%d'), current_base_price)
         self.isin = isin
@@ -98,7 +125,7 @@ class KOCertificate:
         self._date_base_price_tuple = self._date_base_price_tuple2 = None
         # then access setters:
         self.date_base_price_tuple = date_base_price_tuple  # will be accessible through properties with setter for recalculation of base-price series
-        self.date_base_price_tuple2 = date_base_price_tuple2  # set property to inforce datetime
+        self.date_base_price_tuple2 = date_base_price_tuple2  # set property to enforce datetime
 
         # infer missing base_price_tuple from historic_date_future_price_tuple (if provided)
         if historic_date_future_price_tuple is not None:
@@ -114,23 +141,28 @@ class KOCertificate:
     def get_base_price_from_future_price(self, date: str, future_price: float,
                                          use_as_1st_base_price_tuple=False, use_as_2nd_base_price_tuple=False):
         """
-        Compute the historic base price from a given past future price.
+        Calculate the base price from the given future price and underlying price series.
+
+        This function computes a base price based on the defined directional strategy ("long" or "short"), risk premium,
+        subscription ratio, and the underlying price series for the specified date. Optionally, the computed base price can
+        be used to update primary or secondary base price tuples for further processing.
 
         Parameters
         ----------
         date : str
-            Date of the historical future price.
+            The date at which the future price is observed. If the hour information is missing, it is replaced with 10:00
+            to ensure valid processing.
         future_price : float
-            Value of the future product on the given date.
-        use_as_1st_base_price_tuple : bool, default False
-            If True, sets the computed base price as the first calibration point.
-        use_as_2nd_base_price_tuple : bool, default False
-            If True, sets the computed base price as the second calibration point.
+            The future price that will be used to compute the base price.
+        use_as_1st_base_price_tuple : bool, optional
+            If True, updates the primary base price tuple with the computed base price and the given date. Default is False.
+        use_as_2nd_base_price_tuple : bool, optional
+            If True, updates the secondary base price tuple with the computed base price and the given date. Default is False.
 
         Returns
         -------
         float
-            The computed historic base price.
+            The calculated base price corresponding to the specified date and future price.
         """
         date = pd.Timestamp(date)
         if date.hour == 0: date = date.replace(hour=10)  # prevent errors if no hour was provided
@@ -150,23 +182,33 @@ class KOCertificate:
     def get_base_price_from_leverage(self, date: str, leverage: float,
                                          use_as_1st_base_price_tuple=False, use_as_2nd_base_price_tuple=False):
         """
-        Compute the historic base price from a given past future price.
+        Calculates the base price from the provided leverage value and date.
+
+        This method computes the base price of an asset based on the leverage ratio,
+        subscription ratio, risk premium, and the underlying price series corresponding
+        to a specific date. The computation formula adjusts depending on whether the
+        position is 'long' or 'short'. Additionally, if specified, the computed base
+        price and date combination can be stored as the first or second base price tuple
+        for recalculations.
 
         Parameters
         ----------
         date : str
-            Date of the historical future price.
+            Date for which the base price needs to be calculated. If the date contains
+            no hour, it defaults to 10:00 AM.
         leverage : float
-            Value of the future product on the given date.
-        use_as_1st_base_price_tuple : bool, default False
-            If True, sets the computed base price as the first calibration point.
-        use_as_2nd_base_price_tuple : bool, default False
-            If True, sets the computed base price as the second calibration point.
+            The leverage ratio to be used for base price calculation.
+        use_as_1st_base_price_tuple : bool, optional
+            Indicates if the calculated base price and date should be stored as the
+            first base price tuple. Default is False.
+        use_as_2nd_base_price_tuple : bool, optional
+            Indicates if the calculated base price and date should be stored as the
+            second base price tuple. Default is False.
 
         Returns
         -------
         float
-            The computed historic base price.
+            The calculated base price of the asset for the given leverage and date.
         """
         date = pd.Timestamp(date)
         if date.hour == 0: date = date.replace(hour=10)  # prevent errors if no hour was provided
@@ -184,7 +226,19 @@ class KOCertificate:
         return base_price
 
     def plot(self, plot_size=(10, 10), leverage_lim=(0, 10)) -> None:
-        """ Plot price and leverage development. """
+        """
+        Plots the underlying price, base price, future price, and leverage series over time on two
+        subplots. The first subplot shows price-related data while the second subplot illustrates the
+        leverage series. The method allows for customizable plot size and leverage range limits.
+
+        Parameters
+        ----------
+        plot_size : tuple of int, optional
+            A tuple specifying the dimensions of the figure, given as (width, height). Default is (10, 10).
+        leverage_lim : tuple of int, optional
+            A tuple specifying the y-axis limits for the leverage plot, given as (lower_limit, upper_limit).
+            Default is (0, 10).
+        """
         fig, (ax, ax3) = plt.subplots(2, 1, figsize=plot_size)
         ax2 = ax.twinx()
         ax.plot(self.date_index, self.underlying_price_series, color='blue', label='Underlying Price')
@@ -218,7 +272,25 @@ class KOCertificate:
 
     # todo: simplify try/except structure, make coherent with base_price_series property and base_price_change_per_annum
     def enforce_base_price_increase_per_annum(self, abs_increase_pa: float = .02) -> None:
-        """ Enforce defined base price increase rate by keeping the lower (higher for shorts) base_price anchor point and changing the other. """
+        """
+        Adjusts base price values and dates based on the annual price increase and product direction.
+
+        This function compares two initial base price tuples, recalculates one of them, and adjusts
+        the corresponding date by shifting it forward or backward (by a year or a month).
+        The recalculation factor is derived using the specified annual price increase and the
+        product's direction (long or short). The choice of which tuple to adjust depends on the
+        initial configurations.
+
+        Parameters
+        ----------
+        abs_increase_pa : float, optional
+            The absolute fractional increase in the base price applied per annum (e.g., 0.02
+            corresponds to a 2% increase per annum). Defaults to 0.02.
+
+        Returns
+        -------
+        None
+        """
         # sign based on product's direction
         price_change_pa = np.abs(abs_increase_pa) * (-1 if self.direction == 'short' else 1)
 
@@ -268,6 +340,23 @@ class KOCertificate:
         return self.describe()
 
     def describe(self) -> str:
+        """
+        describe(self) -> str
+
+        Generate a detailed string representation of the `KOCertificate` instance, summarizing the
+        price data attributes and product-specific details.
+
+        The returned string includes the start and end dates of the price data, the product ISIN
+        (if available), type, last base price, last leverage, absolute risk premium, subscription
+        ratio, current price, and whether the knockout (KO) marker has been reached.
+
+        Returns
+        -------
+        str
+            A formatted string containing an overview of the `KOCertificate` instance, including
+            relevant price data attributes and product-specific information.
+
+        """
         intro_str = "------------------- KOCertificate Instance -------------------\n\n"
         data_str = f"Price Data Attributes:\n- start date: {self.date_index.min().strftime('%Y-%m-%d')}{' (equals issue date of product)' if self.issue_date is not None else ''}\n- end date: {self.date_index.max().strftime('%Y-%m-%d')}\n\n"
         product_str = f"Product Attributes:\n{f'- ISIN: {self.isin}\n- last base price: {self.base_price_series.iloc[-1]}\n' if self.isin is not None else ''}- type: {self.direction}\n- last leverage: {self.leverage_series.iloc[-1]}\n- risk premium (absolute): {self.risk_premium}\n- subscription ratio: {self.subscription_ratio}\n- current price: {self.price_series.iloc[-1]}\n- reached KO: {self.is_ko_series.iloc[-1]}\n\n"
@@ -335,10 +424,12 @@ class KOCertificate:
         """ Annual base price increase resulting from base price series. Typical values are between 0.02 and 0.03."""
         if self._base_price_change_per_annum is None:  # is set to none if base price series is overwritten
             start = self.base_price_series[self.date_base_price_tuple[0]]
+
             try:  # look one year ahead:
                 end = self.base_price_series[
                     self.date_base_price_tuple[0] + pd.Timedelta('364d')]  # 364 equals exactly 52 weeks
                 is_one_month = False
+
             except KeyError:  # if +1 Year is beyond provided data, look back one year:
                 try:
                     end = self.base_price_series[self.date_base_price_tuple[0] - pd.Timedelta('364d')]
@@ -346,9 +437,14 @@ class KOCertificate:
                 except KeyError:  # if 1 year is too large look 1 month
                     end = self.base_price_series[self.date_base_price_tuple[0] - pd.Timedelta('28d')]
                     is_one_month = True
+
+            # calculation:
+            if end == start: return 0.0  # for leverage = 1 products this is relevant
             self._base_price_change_per_annum = (end / start).item() ** (12 if is_one_month else 1) - 1  # if difference is from one month, convert to annual rate
+
         else:  # correct direction if attribute has already been provided
             self._base_price_change_per_annum = (np.abs(self._base_price_change_per_annum) * (-1 if self.direction == 'short' else 1)).item()
+
         return self._base_price_change_per_annum
 
     @property
@@ -581,80 +677,12 @@ class KOCertificate:
             Defaults to True.
 
         """
-        self.risk_premium, self.subscription_ratio, current_base_price, self.issue_date = fetch_future_info_from_boerse_fra(self.isin,
+        self.risk_premium, self.subscription_ratio, current_base_price, self.issue_date = webint.fetch_future_info_from_boerse_fra(self.isin,
                                                                                                              scrape_driver_executable_path)
         if use_as_2nd_base_price:
             self.date_base_price_tuple2 = (datetime.today().strftime('%Y-%m-%d'), current_base_price)
         else:
             self.date_base_price_tuple = (datetime.today().strftime('%Y-%m-%d'), current_base_price)
-
-
-
-# auxiliary functions:
-def fetch_future_info_from_boerse_fra(isin: str, driver_executable_path: str):
-    """ Scrape risk premium, subscription ratio, base price and issue date for future product based on ISIN. """
-    # auxiliary functions:
-    def highlight_element(element):
-        driver.execute_script(
-            "arguments[0].style.border='3px solid red'; arguments[0].style.background='yellow';",
-            element
-        )
-
-    def fetch_table_element(elements: [], keyword: str) -> str:
-        for element in elements:
-            label = element.find_element(By.CSS_SELECTOR, '.widget-table-cell').text
-            if keyword not in label: continue  # search until keyword match
-            element =  element.find_element(By.CSS_SELECTOR, '.widget-table-cell.text-end')
-            highlight_element(element)
-            return element.text
-        raise KeyError(f"No element with label {keyword} found!")
-
-    # create url (based on known structure):
-    url = f"https://www.boerse-frankfurt.de/zertifikat/{isin.lower()}"
-
-    # initialise driver and open url:
-    service = Service(executable_path=driver_executable_path)
-    driver = webdriver.Chrome(service=service)  # opens window, do not close!
-    driver.get(url)
-
-    # wait until page is loaded (based on presence of "button" table):
-    WebDriverWait(driver, 5).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR,
-                                        ".ng-star-inserted .d-flex.flex-nowrap .widget-container-v2 .content-wrapper .ng-star-inserted"))
-    )
-
-    # navigate to product information ("Stammdaten") tab:
-    stammdaten_button = driver.find_elements(By.CSS_SELECTOR,
-                                             ".ng-star-inserted .d-flex.flex-nowrap .widget-container-v2 .content-wrapper .ng-star-inserted")[7]  # .find_elements(By.CSS_SELECTOR, ".")
-    highlight_element(stammdaten_button)
-    stammdaten_button.click()
-
-    # wait until new page is loaded (based on presence of "kennzahlen" table):
-    WebDriverWait(driver, 5).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR,
-                                        ".ng-star-inserted .d-flex .widget-container-v2 .content-wrapper .ng-star-inserted .col-12 .ar-mt .row .col-12 .table-responsive .table.widget-table .widget-table-row.ng-star-inserted"))
-    )
-
-    # locate, highlight and fetch risk_premium:
-    kennzahlen_table_entries = driver.find_elements(By.CSS_SELECTOR,
-                                                    '.ng-star-inserted .d-flex .widget-container-v2 .content-wrapper .ng-star-inserted .col-12 .ar-mt .row .col-12 .table-responsive .table.widget-table .widget-table-row.ng-star-inserted')
-    risk_premium = fetch_table_element(kennzahlen_table_entries, "Aufgeld absolut")
-
-    # subscription_ratio:
-    basiswert_table_entries = driver.find_elements(By.CSS_SELECTOR,
-                                                   '.ng-star-inserted .d-flex .widget-container-v2 .content-wrapper .ng-star-inserted .col-12 .ar-mt .row .col-12 .table-responsive .table.widget-table')[
-        1].find_elements(By.CSS_SELECTOR, '.widget-table-row.ng-star-inserted')
-    subscription_ratio = fetch_table_element(basiswert_table_entries, 'Bezugsverhältnis')
-
-    # base_price and issue_date:
-    stammdaten_table_entries = driver.find_elements(By.CSS_SELECTOR,
-                                                    '.ng-star-inserted .d-flex .widget-container-v2 .content-wrapper .ng-star-inserted .col-12.col-lg-6.ar-half-pr-lg .widget.ar-p .row .col-12 .table-responsive .table.widget-table .widget-table-row')  # .ar-mt') .row')# .col-12')# .table-responsive .table.widget-table')[1].find_elements(By.CSS_SELECTOR, '.widget-table-row.ng-star-inserted')
-    base_price = fetch_table_element(stammdaten_table_entries, 'Basispreis')
-    issue_date = fetch_table_element(stammdaten_table_entries, 'Ausgabedatum')
-
-    # close driver and return:
-    driver.quit()
-    return strconv.str_to_float(risk_premium), strconv.str_to_float(subscription_ratio), strconv.str_to_float(base_price), issue_date
 
 
 class KOCertificateSet:
