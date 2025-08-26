@@ -6,6 +6,7 @@ from src.pipeline.financial_products import KOCertificate, KOCertificateSet
 from src.utils import file_management as filemgmt
 from src.pipeline.rl_agents import MultiProductAgent
 
+from datetime import datetime
 from itertools import product
 import gymnasium as gym
 from gymnasium import spaces
@@ -22,6 +23,70 @@ import matplotlib.pyplot as plt
 class RLTradingEnv(gym.Env):
     """
     A reinforcement learning environment for trading using structured price data and predictive signals.
+
+    This environment wraps a trading simulation where an agent interacts with financial instruments
+    (e.g., knockout certificates) and receives predictions from one or more LSTM-based predictors.
+    Actions are taken based on leverage categories, and rewards are based on changes in portfolio value.
+
+    The environment steps once per day for each daily prediction hour defined by the predictors.
+
+    Attributes
+    ----------
+    metadata : dict
+        Dictionary containing environment metadata, including render modes.
+    price_sampling_rate_minutes : int
+        Frequency of the price data in minutes.
+    starting_cash : float
+        Initial cash balance for the agent.
+    commission_rate : float
+        Effective commission rate or spread applied on each transaction.
+    verbose : bool
+        Whether to print detailed step and trade information.
+    potential_horizon_days : int
+        Forecast days to scale expected return potential to. Only relevant for info statements.
+    current_episode : int
+        Current episode number during the simulation.
+    predictor_instances : list of LSTMPredictor
+        Predictors used to generate potential signals.
+    _daily_prediction_hours : object
+        Internal predictor setting for daily prediction sampling.
+    _product_set : KOCertificateSet
+        Set of financial products (e.g., long/short leverage instruments).
+    _leverage_categories : list of float
+        Leverage brackets used to define the action space.
+    _include_open_leverage_category : bool
+        Whether an additional category is included for leverage greater than the last entry.
+    trading_quantity_per_leverage_factor : float
+        Determines trade size as a fraction of balance per leverage category.
+    sell_opposite_direction_if_no_cash : bool
+        If insufficient cash for buying operation, specifies whether to sell opposite certificates.
+    sell_all_opposite_products_if_no_cash : bool
+        If sell_opposite_products_if_no_cash is True and this is True, sells all opposite products;
+        otherwise, sells only opposite leverage of products.
+    _action_enum : object
+        Internal enumeration representation for actions.
+    action_space : Discrete
+        Action space for the environment, determined by leverage categories and product types.
+    _step_dates_list : list
+        List of step dates used during the simulation.
+    _step_timestamp_list : list
+        Internal list tracking timestamps of each step.
+    current_step : int
+        Current step number during the episode.
+    observation_space : Box
+        Observation space for the environment, containing predictor outputs and portfolio state.
+    _potential_estimates_dict : dict
+        Internal cached dictionary of potential observations from predictors.
+    precalculate_predictor_observations : bool
+        If true, calculates all potential estimates upon accessing the first observation for runtime efficiency.
+    reward_range : tuple of float
+        Possible range of rewards for actions, currently set to (-infinity, infinity).
+    cash : float
+        Current cash balance available to the agent.
+    shares_per_product : Series
+        Pandas Series representing the number of shares owned per product by ISIN.
+    shares : float
+        Redundant attribute for tracking shares (to be removed in the future).
     """
     metadata = {'render.modes': ['human']}
 
@@ -46,49 +111,114 @@ class RLTradingEnv(gym.Env):
                  potential_horizon_days: int = 90,
                  ):
         """
-        A reinforcement learning environment for trading using structured price data and predictive signals.
-
-        This environment wraps a trading simulation where an agent interacts with financial instruments
-        (e.g., knockout certificates) and receives predictions from one or more LSTM-based predictors.
-        Actions are taken based on leverage categories, and rewards are based on changes in portfolio value.
-
-        The environment steps once per day for each daily prediction hour defined by the predictors.
+        Initializes an environment for reinforcement learning-based trading. This class is designed to work with a
+        price time series or price CSV file, multiple predictors, and a set of financial products to create an
+        actionable trading environment. It allows the customization of trading parameters such as commission rates,
+        leverage categories, and cash management rules. The environment provides an observation space based on
+        predictor outputs and financial metrics, and an action space derived from financial product configurations.
 
         Parameters
         ----------
-        price_csv_path : str or Path
-            Path to CSV file containing historical price data.
-        price_sampling_rate_minutes : int, default 1
-            Frequency of the price data in minutes.
-        price_column : str, default 'close'
-            Column name in the CSV representing the price.
-        date_column : str, default 'date'
-            Column name in the CSV representing the timestamp.
-        predictor_instances : list of LSTMPredictor
-            Predictors used to generate potential signals.
-        precalculate_predictor_observations : bool, default True
-            If true, calculates all potential estimates upon accessing first observation (run-time efficient for training).
-        product_set : KOCertificateSet
-            Set of financial products (e.g., long/short leverage instruments).
-        leverage_categories : list of float, default (1.0, 2.0, 3.0, 4.0, 5.0)
-            Leverage brackets used to define the action space.
-        include_open_leverage_category : bool, default False
-            Whether to include an additional category for leverage greater than the last entry.
-        trading_quantity_per_leverage_factor : float, default 1.0
-            Determines trade size as a fraction of balance per leverage category.
-        sell_opposite_direction_if_no_cash : bool, default True
-            If insufficient cash for buying operation: sell opposite certificates.
-        sell_all_opposite_products_if_no_cash : bool, default True
-            If sell_opposite_products_if_no_cash is True and this is True, sells ALL opposite products.
-            If this is False, sells only opposite leverage (if long = 1, short = 5) of products.
-        starting_cash : float, default 1000000
-            Initial cash balance for the agent.
-        commission_rate : float, default 0.001
-            Effective commission rate or spread applied on each transaction.
-        verbose : bool, default True
-            Whether to print detailed step and trade information.
-        potential_horizon_days : int, default is 90
-            Forecast days to scale expected return potential to. Only relevant for info statements.
+        price_csv_path : Union[str, Path], optional
+            Path to a CSV file containing price data. Either `price_csv_path` or `price_series` must be provided.
+        price_series : pd.Series, optional
+            Time series object containing price data. Either `price_series` or `price_csv_path` must be provided.
+        price_sampling_rate_minutes : int, optional
+            Frequency, in minutes, at which prices are sampled for the environment. Default is 1 minute.
+        price_column : str, optional
+            Column name in the price dataset to be used as the price. Default is 'close'.
+        date_column : str, optional
+            Column name in the price dataset used for dates. Default is 'date'.
+        predictor_instances : list of LSTMPredictor, optional
+            List of predictor instances that provide features for the environment.
+        precalculate_predictor_observations : bool, optional
+            Whether to precalculate predictor observations for optimization. Default is True.
+        product_set : KOCertificateSet, optional
+            Set of financial products (e.g., knockout certificates) used to create the action space.
+        leverage_categories : list of float, optional
+            List of leverage factors used to define the action space. Default is [1.0, 2.0, 3.0, 4.0, 5.0].
+        include_open_leverage_category : bool, optional
+            Whether to include an open leverage category where larger values than the last entry represent the
+            highest category. Default is False.
+        trading_quantity_per_leverage_factor : float, optional
+            Multiplier to adjust trading size according to the leverage factor. Default is 1.0.
+        sell_opposite_direction_if_no_cash : bool, optional
+            Whether to liquidate positions in the opposite direction if there is no cash available for trading.
+            Default is True.
+        sell_all_opposite_products_if_no_cash : bool, optional
+            Whether to sell all products in the opposite direction if there is no cash available for trading.
+            Default is True.
+        starting_cash : float, optional
+            Initial amount of cash in the environment. Default is 1,000,000.
+        commission_rate : float, optional
+            Rate of commission or transaction fee, typically reflecting the spread. Default is 0.001.
+        verbose : bool, optional
+            Enables detailed logs and debug messages during environment interaction. Default is True.
+        potential_horizon_days : int, optional
+            The maximum potential horizon in days for the trading environment. Default is 90.
+
+        Attributes
+        ----------
+        _price_series : pd.Series or None
+            Stores the provided price series data.
+        _price_csv_path : Union[str, Path] or None
+            Path to the provided price CSV file.
+        _price_column : str
+            The name of the column used for price data.
+        _date_column : str
+            The name of the column used for date data.
+        price_sampling_rate_minutes : int
+            Frequency, in minutes, at which prices are sampled.
+        starting_cash : float
+            Initial cash amount in the environment.
+        commission_rate : float
+            Transaction fee or spread rate for trading.
+        verbose : bool
+            Flag to toggle detailed logging.
+        potential_horizon_days : int
+            Maximum number of allowable trading days.
+        current_episode : int
+            Counter for the current episode in the environment.
+        predictor_instances : list of LSTMPredictor or None
+            List of predictors used in the environment.
+        _daily_prediction_hours : None or any
+            Reserved for configurations related to prediction sampling.
+        _product_set : KOCertificateSet or None
+            Set of financial products defining the action space.
+        _leverage_categories : list of float
+            Leverage values used in the action space.
+        _include_open_leverage_category : bool
+            Indicates if the highest leverage category is open.
+        trading_quantity_per_leverage_factor : float
+            Determines trade size based on leverage.
+        sell_opposite_direction_if_no_cash : bool
+            Indicates if opposite positions will be liquidated when cash is insufficient.
+        sell_all_opposite_products_if_no_cash : bool
+            Indicates if all opposite positions will be liquidated when cash is insufficient.
+        _action_enum : None or any
+            Represents the action space structure.
+        action_space : gym.spaces.Discrete
+            Discrete action space for the trading environment.
+        _step_dates_list : None or any
+            Contains the list of trading step dates (to be calculated dynamically).
+        _step_timestamp_list : None or any
+            Contains the list of trading step timestamps (to be calculated dynamically).
+        current_step : int
+            The current step within a trading episode.
+        observation_space : gym.spaces.Box
+            Continuous observation space defined by predictors and financial metrics.
+        _potential_estimates_dict : None or any
+            Holds cached potential estimates for predictors.
+        precalculate_predictor_observations : bool
+            Flag to control predictor observation precomputation.
+        reward_range : tuple of float
+            Specifies the range of possible reward values.
+        cash : float
+            Current cash amount in the environment.
+        shares_per_product : pd.Series
+            Tracks the number of shares held for each product.
+        shares : float
+            Tracks the total number of all shares collectively held.
         """
         super(RLTradingEnv, self).__init__()  # initialise base class
 
@@ -151,33 +281,57 @@ class RLTradingEnv(gym.Env):
         # todo: remove
         self.shares = 0
 
-    def step(self, action: int, track_portfolio_exposure: bool = True, start_new_episode_if_finished: bool = True):
+    def step(self, action: int, track_portfolio_exposure: bool = True, start_new_episode_if_finished: bool = True,
+             trade_implementation_callback: callable = None):
         """
-        Run one timestep of the environment’s dynamics.
-
-        This method executes the given action, updates the internal state, calculates the reward,
-        and returns the next observation, the reward, a boolean indicating if the episode is done,
-        and a diagnostic info dictionary.
+        Performs one step in the environment simulation, taking the specified action and advancing
+        the simulation. Updates the internal state, computes the reward, and provides relevant
+        information about the environment's current state.
 
         Parameters
         ----------
         action : int
-            Action index corresponding to the current action enumeration.
-        track_portfolio_exposure : bool, default True
-            Whether to track portfolio exposure during each step. Run-time costly.
+            The action to be executed, represented as an integer corresponding to an internal
+            action enumeration dictionary.
+        track_portfolio_exposure : bool, optional
+            Flag indicating whether to calculate and track the portfolio's current exposure
+            during this step (default is True).
+        start_new_episode_if_finished : bool, optional
+            Flag specifying whether to automatically start a new episode if the current
+            episode has finished. If set to False and the episode is finished, a ValueError
+            will be raised (default is True).
 
         Returns
         -------
-        observation : np.ndarray
-            Current state observation including predictor signals, cash, and holdings.
+        obs : object
+            The current observation of the environment's state after taking the specified
+            action.
         reward : float
-            Reward from the action taken, equal to change in portfolio value.
+            The computed reward for the step, typically representing the change in the
+            portfolio balance resulting from the action taken.
         done : bool
-            Whether the current episode is finished.
+            A flag indicating whether the current episode has finished.
         truncated : bool
-            Whether the current episode was truncated.
+            Gymnasium-specific flag, currently always set to False for this implementation.
         info : dict
-            Additional diagnostic information for debugging and logging.
+            Additional information about the environment's current state after the step. The
+            dictionary may include keys such as:
+                - 'Step': Current step number.
+                - 'Time': Timestamp of the current step in '%Y-%m-%d %H:%M:%S' format.
+                - 'Reward': The rounded reward for the step.
+                - 'Action': Action performed, as defined in the action enumeration dictionary.
+                - 'Avg. Expected Potential / {horizon}d': Average scaled predicted potential
+                  over the defined horizon.
+                - 'Cash': The current cash balance available in the portfolio.
+                - 'Total': The total balance of the portfolio, including cash and investments.
+                - 'Total Exposure' (if tracked): Weighted average exposure of the portfolio
+                  based on leverage, direction, and portfolio share.
+
+        Raises
+        ------
+        ValueError
+            Raised when `start_new_episode_if_finished` is False, but the current episode
+            has ended, and a new episode cannot be started.
         """
         # infer current balance:
         balance = self.current_balance
@@ -190,12 +344,12 @@ class RLTradingEnv(gym.Env):
                 self.current_episode = self.next_episode()
                 self.init_start_step()
             else:
-                raise ValueError("Episode is finished, but start_new_episode_if_finished is False. Aborting")
+                raise ValueError("Episode is finished, but start_new_episode_if_finished is False. Aborting...")
         else:
             done = False
 
         # take action:
-        self.take_action(action)
+        self.take_action(action, trade_implementation_callback=trade_implementation_callback)
 
         # compute status and calculate reward:
         reward = self.current_balance - balance  # equals change of balance
@@ -235,17 +389,32 @@ class RLTradingEnv(gym.Env):
         # current observation property constructs observation space
         return obs, reward, done, False, info  # gymnasium returns terminated, truncated check
 
-    def take_action(self, action: int):
+    def take_action(self, action: int, trade_implementation_callback: callable = None):
         """
-        Execute the given action and update environment state accordingly.
-
-        Handles both buy and sell logic, including selection of products from the product set,
-        calculation of investable amount, share buying/selling, and updating cash and holdings.
+        Executes trading actions such as buying or selling products based on specified leverage,
+        direction, and other rules. Determines the appropriate products and quantities for the action
+        and updates the portfolio accordingly.
 
         Parameters
         ----------
         action : int
-            Action index corresponding to the current action enumeration.
+            The action identifier used to determine the type of operation (e.g., Buy or Sell),
+            the direction (e.g., long or short), and the leverage span.
+
+        Notes
+        -----
+        - The method determines which product to trade based on its leverage, direction, and a predefined
+          mapping (`self.action_enum_dict`). If the desired leverage is unavailable, it attempts to find
+          the next suitable leverage by modifying the search criteria.
+        - The operation (Buy or Sell) takes into account the available cash, portfolio balance, and trading
+          limits. For buying actions, it calculates the maximum number of shares that can be purchased
+          within the provided constraints. For selling actions, it identifies the positions to close
+          using the specified leverage and direction.
+        - For `Buy` actions, if insufficient cash is available, there are options (controlled by flags)
+          to sell opposite-direction products to free up cash for buying.
+        - Verbose logging is provided if the `self.verbose` flag is enabled, offering insight into
+          each operation's details and actions taken.
+        - Commission rates are factored into both buying and selling price calculations.
         """
         # classify action according to -> type, direction, leverage_span
         if action == 0:
@@ -286,11 +455,7 @@ class RLTradingEnv(gym.Env):
             self.shares_per_product[isin] += shares_to_buy
             self.cash -= shares_to_buy * price
 
-            if self.verbose:
-                print(
-                    f"[STEP {self.current_step}] Bought {shares_to_buy} shares of {isin} ({direction} with leverage in {leverage_span}) at {price}.")
-                print(f"    Cash: {self.cash}, Holding: {self.current_holding}")
-
+            # if purchase not possible:
             # todo: think, whether here a threshold is better than == 0
             if maximum_buyable_shares == 0 and self.sell_opposite_direction_if_no_cash:
                 opposite_direction = 'short' if direction == 'long' else 'long'
@@ -311,6 +476,15 @@ class RLTradingEnv(gym.Env):
                 type = 'Sell'
                 leverage_span = (opposite_leverage, leverage_span[1])
                 direction = opposite_direction
+
+            else:  # if purchase possible
+                if self.verbose:
+                    print(
+                        f"[STEP {self.current_step}] Bought {shares_to_buy} shares of {isin} ({direction} with leverage in {leverage_span}) at {price}.")
+                    print(f"    Cash: {self.cash}, Holding: {self.current_holding}")
+
+                # action callback:
+                trade_implementation_callback(isin = isin, amount = shares_to_buy, action = type.lower())
 
         if type == 'Sell':
             # select all products with leverages inside span and higher:
@@ -333,6 +507,11 @@ class RLTradingEnv(gym.Env):
                 print(
                     f"[STEP {self.current_step}] Sold\n{shares_to_sell}\nshares ({direction}s with leverage higher than {leverage_span[0]}) at\n{prices}.")
                 print(f"    Cash: {self.cash}, Holding: {self.current_holding}")
+
+            # action callback:
+            if isinstance(shares_to_sell, pd.Series):  # if multiple shares to sell (can happen upon selling)
+                for isin, shares in zip(isins, shares_to_sell):
+                    trade_implementation_callback(isin=isin, amount=shares, action=type.lower())
 
     def next_episode(self):
         """
@@ -755,11 +934,44 @@ class RLTradingEnv(gym.Env):
                          **plot_kwargs
                          ) -> (pd.Series, pd.Series, (float, float, float, float, float, float)):
         """
-        Simulate agent behavior in environment.
-        Returns tuple with
-        1) policy_performance
-        2) benchmark_performance as pd.Series normalised across performance_time_unit
-        3) tuple with (mean, median, std.dev., min, max, SharpeRatio) alpha.
+        Executes a backtesting procedure for a trading environment where an agent interacts with a market simulator
+        to evaluate its performance. Tracks portfolio exposure, computes normalized returns, and benchmarks against
+        a hold strategy (HODL). Computes performance statistics such as mean, median, standard deviation, Sharpe ratio,
+        and alpha. Optionally logs results, plots performance metrics, and prints detailed statistics.
+
+        Parameters
+        ----------
+        agent : Union[MultiProductAgent, DQN]
+            The agent responsible for predicting actions during the backtesting process.
+        mute_environment : bool, optional
+            If True, suppresses verbose logging from the environment during backtesting.
+        print_statistics : bool, optional
+            If True, prints the performance statistics for the trading strategy over the backtesting period.
+        reset_environment : bool, optional
+            If True, resets the environment to the initial state before starting backtest iterations.
+        track_portfolio_exposure_every : int, optional
+            The number of steps after which the portfolio exposure should be tracked and updated.
+        save_log_directory : str, optional
+            Directory to save the backtesting log as a CSV file. If None, logging results are not saved.
+        plot_results : bool, optional
+            If True, visualizes the backtesting results using predefined plotting methods.
+        performance_time_unit : Literal['p.a.', 'p.m.'], optional
+            Specifies the performance evaluation time unit. 'p.a.' for annualized metrics and 'p.m.' for monthly metrics.
+        sharpe_risk_free_rate_pa : float, optional
+            Risk-free rate used for Sharpe ratio calculation, expressed as an annualized rate.
+        plot_kwargs : dict, optional
+            Additional plotting parameters passed as keyword arguments to the plot function.
+
+        Returns
+        -------
+        pd.Series
+            A pandas Series containing the normalized policy return series over the backtesting period.
+        pd.Series
+            A pandas Series containing the normalized benchmark return series (HODL) over the backtesting period.
+        tuple of float
+            A tuple containing alpha performance statistics: mean alpha, median alpha, standard deviation of alpha,
+            minimum alpha, maximum alpha, and Sharpe ratio.
+
         """
         if reset_environment: obs, _ = self.reset()  # reset episode and fetch first observation
         else: obs = self.current_observation  # or fetch current observation
@@ -865,9 +1077,36 @@ class RLTradingEnv(gym.Env):
                               agent: Union[MultiProductAgent, DQN] = None,
                               save_fig_directory: str = None):
         """
-        Visualize backtest results.
+        Plots the backtest results, including normalized portfolio values, performance metrics, portfolio
+        exposure, cash distributions, and potential signals. This visualization provides detailed insights
+        into the performance of a policy against a benchmark, highlighting areas of overperformance or
+        underperformance and their respective signals.
 
-        Include monthly or annual returns as policy_return_series to include time-normalized return plot.
+        Parameters
+        ----------
+        log_df : pd.DataFrame
+            DataFrame containing detailed portfolio logs, including potential values, total exposure,
+            cash values, and portfolio totals such as "Total" and "Benchmark".
+
+        policy_return_series : pd.Series, optional
+            Time series representing portfolio returns calculated from the agent's policy results.
+            Default is None.
+
+        benchmark_return_series : pd.Series, optional
+            Time series representing benchmark portfolio returns for comparison against the policy.
+            Default is None.
+
+        performance_time_unit : {'p.a.', 'p.m.'}, optional
+            String indicating the time normalization for return performance, either per annum ('p.a.') or
+            per month ('p.m.'). Default is 'p.a.'.
+
+        agent : MultiProductAgent or DQN, optional
+            The agent whose performance is being analyzed. If `MultiProductAgent`, action thresholds
+            and signals will also be plotted. Default is None.
+
+        save_fig_directory : str, optional
+            File directory path to save the resulting visualized backtest plot as a PNG file. If not
+            provided, the resulting visualization will not be saved. Default is None.
         """
         # prepare axes:
         if policy_return_series is not None:
@@ -994,22 +1233,60 @@ def env_parametrisation_loop(env_price_sampling_rate_minutes: int,
                              env_price_series: pd.Series = None,
                              sort_metric: Literal['Mean', 'Median', 'StdDev', 'Min', 'Max', 'SharpeRatio'] = 'Mean',
                              print_progress: bool = True,
+                             backtest_database_dir: Union[str, Path] = None,
+                             include_constant_params_in_output: bool = True,
                              **param_grid_and_constants):
     """
-    Backtest multiple hyperparameter settings for RLTradingEnv class.
+    Executes a parameterization loop over varying and constant parameters for environment testing,
+    evaluating backtesting performance metrics for different parameter configurations.
 
-    Automatically infers parameter grid from provided keyword arguments.
+    This function enables systematic experimentation across different combinations of parameters.
+    It validates the input data sources, iterates through the Cartesian product of parameter grids,
+    executes backtests using the environment and agent, and compiles the resulting metrics into
+    a structured DataFrame. If a directory for results is provided, the results can optionally
+    be combined with existing results in the database.
 
-    Provide lists of values for parameters to vary, and single values for constants.
+    Parameters
+    ----------
+    env_price_sampling_rate_minutes : int
+        The sampling rate (in minutes) for the price data in the environment.
 
-    :param env_price_file_path: Path to the CSV file containing price data.
-    :param env_price_series: Pandas Series containing price data (alternative to env_price_file_path).
-    :param env_price_sampling_rate_minutes: Sampling rate for the price data in minutes.
-    :param env_product_set: Instance of KOCertificateSet for the environment.
-    :param sort_metric: Metric by which to sort the results (e.g., 'Mean', 'StdDev').
-    :param print_progress: Whether to print progress during execution.
-    :param param_grid_and_constants: Additional parameters to vary or keep constant in the environment.
-    :return: DataFrame summarizing results of backtests.
+    env_product_set : KOCertificateSet
+        The product set object representing the financial instruments used in the backtest.
+
+    env_price_file_path : Path, optional
+        The file path to a CSV containing price data for environment backtests. Either this
+        or `env_price_series` must be provided. Default is None.
+
+    env_price_series : pd.Series, optional
+        A pandas Series object containing price data for backtests. Either this or
+        `env_price_file_path` must be provided. Default is None.
+
+    sort_metric : Literal['Mean', 'Median', 'StdDev', 'Min', 'Max', 'SharpeRatio'], optional
+        A string specifying the backtest metric by which to sort the final DataFrame. The default
+        is 'Mean'.
+
+    print_progress : bool, optional
+        Whether to print progress information during the parameterization loop. Default is True.
+
+    backtest_database_dir : Union[str, Path], optional
+        Directory path for storing cumulative backtest results. If specified, results are appended
+        to this database. Default is None.
+
+    include_constant_params_in_output : bool, optional
+        Whether to include constant parameter values in the result DataFrame. Default is True.
+
+    **param_grid_and_constants : dict
+        Keyword arguments representing parameters for testing. Iterable values are considered grid
+        parameters (varying between backtests), while other values are treated as constants.
+
+    Returns
+    -------
+    pd.DataFrame
+        A pandas DataFrame containing backtest results. Each row represents a parameter configuration
+        and its corresponding metrics. The DataFrame includes columns for grid parameters, metrics,
+        and optionally constant parameters.
+
     """
     # Validate that at least one price source is provided
     if env_price_file_path is None and env_price_series is None:
@@ -1021,6 +1298,7 @@ def env_parametrisation_loop(env_price_sampling_rate_minutes: int,
 
     # Result frame with columns for all varying parameters and resulting metrics:
     columns = list(grid_params.keys()) + ['Mean', 'Median', 'StdDev', 'Min', 'Max', 'SharpeRatio']
+    if include_constant_params_in_output: columns += list(constant_params.keys())
     result_array = []  # Initialize result array
 
     # All possible ordered pairs of grid parameters:
@@ -1073,6 +1351,7 @@ def env_parametrisation_loop(env_price_sampling_rate_minutes: int,
         # Convert np values to regular values and concat to result row:
         metric_list = [metric.item() if isinstance(metric, np.float64) else metric for metric in metric_tuple]
         result_row = list(config) + metric_list
+        if include_constant_params_in_output: result_row += list(constant_params.values())
         result_array.append(result_row)  # Append to result array
 
     # Convert to frame and sort eventually:
@@ -1080,5 +1359,15 @@ def env_parametrisation_loop(env_price_sampling_rate_minutes: int,
     if sort_metric is not None:
         minimize = sort_metric in ['StdDev']
         results = results.sort_values(by=sort_metric, ascending=minimize)
+
+    # update backtest_database_dir:
+    if backtest_database_dir is not None:
+        results['date'] = datetime.today().strftime('%Y-%m-%d')
+        try:  # try concatenation
+            previous_frame = pd.read_csv(filemgmt.most_recent_file(backtest_database_dir))
+            new_frame = pd.concat([previous_frame, results], ignore_index=True)
+        except ValueError:  # otherwise just save result
+            new_frame = results
+        new_frame.to_csv(backtest_database_dir / filemgmt.file_title("Backtest Database", ".csv"), index=False)
 
     return results
