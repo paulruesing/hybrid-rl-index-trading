@@ -351,15 +351,34 @@ class StockPriceDataManager:
                                                  save_path=self.interpolated_files_dir,
                                                  save_title_identifier=f'{self.ticker_symbol} {self.price_column}')
 
-    def update(self):
-        """ Update downloaded and interpolated data. """
+    def update(self, force_include_scraped: bool = None):
+        """
+        Updates the downloaded and interpolated data time ranges.
+
+        If `force_include_scraped` is provided, it temporarily overwrites the global
+        `include_scraped_downloads` setting for the duration of the update process.
+
+        Parameters
+        ----------
+        force_include_scraped : bool, optional
+            If specified, temporarily overwrites the current value of
+            `include_scraped_downloads` to control whether scraped data
+            should be included during processing.
+        """
         print(
             f"Downloaded data ranged from\t{self.downloaded_data_time_range[0]} to {self.downloaded_data_time_range[1]}")
         self.download_new_data()
         print(f"now ranges from\t\t\t\t{self.downloaded_data_time_range[0]} to {self.downloaded_data_time_range[1]}")
+
+        # if provided, overwrite include_scraped_downloads temporarily
+        if force_include_scraped is not None:
+            old_include_scraped = self.include_scraped_downloads; self.include_scraped_downloads = force_include_scraped
         print(f"\nInterpolated data ranged from\t{self.interp_data_time_range[0]} to {self.interp_data_time_range[1]}")
         self.update_interpolated_data()
         print(f"now ranges from\t\t\t\t\t{self.interp_data_time_range[0]} to {self.interp_data_time_range[1]}")
+
+        # reset custom_include_scraped
+        if force_include_scraped is not None: self.include_scraped_downloads = old_include_scraped
 
 
 ### Data manipulation functions
