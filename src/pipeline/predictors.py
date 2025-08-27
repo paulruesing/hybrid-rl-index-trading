@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from itertools import product
 
+from datetime import datetime
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1877,13 +1878,27 @@ class PredictorManager:
                 "preset_type": inferred_preset_type.lower(),
             }
 
-    def add_predictors_from_dir(self, dir_path: str, recursive: bool = True):
+    def add_predictors_from_dir(self, dir_path: str, recursive: bool = True,
+                                not_older_than_n_days: int = None,
+                                exclude_files_before: pd.Timestamp = None,):
         """
-        Traverses a directory to find all `.pt` files and adds them as predictors.
+        Adds predictor files from the specified directory to the processing pipeline. Filters files based on the date encoded in the file name.
 
-        :param dir_path: Path to the directory to traverse.
-        :param recursive: Whether to traverse recursively into subdirectories.
+        Parameters
+        ----------
+        dir_path : str
+            Path to the directory containing predictor files.
+        recursive : bool, optional
+            Whether to traverse directories recursively to locate `.pt` files. Defaults to True.
+        not_older_than_n_days : int, optional
+            Filters out files older than this many days. Overrides `exclude_files_before` if both are provided.
+        exclude_files_before : pandas.Timestamp, optional
+            Skips files with dates earlier than this timestamp.
         """
+        if not_older_than_n_days is not None:  # Derive exclude_files_before from 'not_older_than_n_days'
+            exclude_files_before = pd.Timestamp.now() - pd.Timedelta(days=not_older_than_n_days)
+            # overwrites exclude_files_before
+
         dir_path = Path(dir_path)
 
         if not dir_path.is_dir():
@@ -1894,6 +1909,17 @@ class PredictorManager:
 
         # Traverse the directory and find all .pt files
         for file_path in dir_path.glob(pattern):
+            # Extract the date from the first 10 characters of the file name
+            file_name = Path(file_path).name
+            try:
+                file_date = datetime.strptime(file_name[:10], "%Y-%m-%d")
+            except ValueError:
+                print(f"Invalid date format in file name: {file_name[:10]}\nSkipping...")
+                continue
+            
+            if exclude_files_before is not None:  # skip files before threshold timestamp
+                if file_date <= exclude_files_before: continue
+            
             self.add_predictor(file_path=str(file_path))
 
     def get_predictor(self, name: str) -> dict:
@@ -1906,36 +1932,28 @@ class PredictorManager:
         return self.predictors.get(name)
 
     def get_predictors_by_type_sorted(self, architecture: str = None, preset_type: str = None,
-                                      return_instances: bool = True, k_best: int = None) -> Union[list[dict], list[NNPredictor]]:
+                                      return_instances: bool = True, k_best: int = None,
+                                      **instantiation_kwargs) -> Union[list[dict], list[NNPredictor]]:
         """
-        Retrieve and sort predictors based on filtering criteria, returning either a list of
-        instances or dictionaries.
-
-        This method filters available predictors based on the specified architecture and preset type.
-        The filtered predictors are sorted by their validation hit rate in descending order. If requested,
-        it instantiates the predictors and returns a list of instances; otherwise, it returns a list of
-        dictionaries containing the predictor details.
+        Retrieves a list of predictors filtered and sorted by validation hit rate.
 
         Parameters
         ----------
         architecture : str, optional
-            The architecture type to filter the predictors. If None, predictors of all architectures
-            are considered.
+            The architecture to filter predictors by. If None, filters are not applied based on architecture.
         preset_type : str, optional
-            The preset type to filter the predictors. If None, predictors of all preset types are
-            considered. The provided value is case-insensitively matched against predictors.
-        return_instances : bool, default=True
-            If True, the method returns a list of instantiated predictor objects. If False, it returns
-            a list of dictionaries containing predictor details.
+            The preset type to filter predictors by. If None, filters are not applied based on preset type.
+        return_instances : bool, optional
+            Whether to return instantiated predictors. If True, predictors are instantiated; otherwise, their metadata is returned.
         k_best : int, optional
-            The number of top predictors to return after sorting. If None, all filtered predictors are
-            returned.
+            The maximum number of top predictors to return based on validation hit rate. If None, all predictors are returned.
+        instantiation_kwargs : dict, optional
+            Additional keyword arguments passed to the predictor instantiation process.
 
         Returns
         -------
         list of dict or list of NNPredictor
-            A list of either dictionaries representing the details of predictors or a list of instantiated
-            predictors, depending on the value of `return_instances`.
+            A list of predictors either as dictionaries with metadata or as instantiated NNPredictor objects, depending on the value of `return_instances`.
         """
         # Filter predictors
         filtered = [
@@ -1951,34 +1969,27 @@ class PredictorManager:
         if return_instances:
             pred_list = []
             for pred_dict in pred_dict_list:
-                pred_list.append(self.instantiate_predictor(pred_dict['name']))
+                pred_list.append(self.instantiate_predictor(pred_dict['name'],
+                                                            **instantiation_kwargs))
             return pred_list
         else:
-            return sorted(filtered, key=lambda x: x["validation_hit_rate"], reverse=True)
+            return pred_dict_list
 
-    def instantiate_predictor(self, name: str) -> NNPredictor:
+    def instantiate_predictor(self, name: str, **predictor_kwargs) -> NNPredictor:
         """
-        Instantiates a predictor object based on the given name by retrieving its configuration and initializing the corresponding architecture.
+        Instantiates a predictor object based on the specified name and architecture. Automatically resolves the associated time-series data based on the preset category and initializes either an LSTM or Transformer predictor.
 
         Parameters
         ----------
         name : str
-            The identifier of the predictor to be instantiated.
+            Name of the predictor to be instantiated. This name is used to fetch the predictor's configuration from the system.
+        predictor_kwargs : dict
+            Additional keyword arguments to pass to the constructor of the predictor during instantiation.
 
         Returns
         -------
         NNPredictor
-            An instance of the appropriate predictor class (LSTMPredictor or TransformerPredictor) initialized with the required configuration.
-
-        Raises
-        ------
-        ValueError
-            If self.data_manager is None, if the predictor name is not found, or if an invalid preset category or architecture is provided.
-
-        Notes
-        -----
-        The preset category determines the time resolution to use for price series data, categorized by 'a', 'b', 'c', or 'd'. Only 'LSTM' and 'Transformer' architectures are supported.
-        """
+           """
         if self.data_manager is None: raise ValueError(
             "self.data_manager required for automatic predictor instantiation.")
 
@@ -2006,6 +2017,7 @@ class PredictorManager:
                                  preset_type=predictor_dict['preset_type'],
                                  name=name,
                                  verbose=False,
+                                 **predictor_kwargs
                                  )
         elif architecture == 'Transformer':
             return TransformerPredictor(model_load_file_path=predictor_dict['file_path'],
@@ -2013,9 +2025,57 @@ class PredictorManager:
                                         preset_type=predictor_dict['preset_type'],
                                         name=name,
                                         verbose=False,
+                                        **predictor_kwargs
                                         )
         else:
             raise ValueError(f"Invalid architecture: {architecture}, has to be one of 'LSTM' or 'Transformer'.")
+
+    def fine_tune_predictors(self,
+                             architectures_to_finetune: [str], types_to_finetune: [str],
+                             finetune_working_directory: Union[Path, str],
+                             train_epochs: int = 200, early_stopping_patience: int = 10,
+                             verbose_training: bool = True, custom_step_loss_weight_range: tuple = None,
+                             ):
+        """
+        Fine-tune the best predictors (based on val. HR) of each provided architecture and type.
+
+        Parameters
+        ----------
+        architectures_to_finetune : list of str
+            List of architectures to fine-tune predictors for.
+        types_to_finetune : list of str
+            List of preset types to fine-tune predictors for.
+        finetune_working_directory : Union[Path, str]
+            Directory to save the fine-tuned models.
+        train_epochs : int, optional
+            Number of epochs to train the model, default is 200.
+        early_stopping_patience : int, optional
+            Number of epochs for early stopping patience, default is 10.
+        verbose_training : bool, optional
+            If True, enables verbose output during training, default is True.
+        custom_step_loss_weight_range : tuple, optional
+            Custom range for the forecast step loss weights, if applicable, default is None.
+        """
+        for architecture, preset in product(architectures_to_finetune, types_to_finetune):
+            print("\nFine-tuning best predictor for architecture:\t\t", architecture, "\tand preset type:\t\t", preset,
+                  "")
+            # instantiate predictor:
+            instance = \
+                self.get_predictors_by_type_sorted(architecture=architecture, preset_type=preset, return_instances=True,
+                                                   k_best=1, )[0]
+
+            # set training parameters
+            instance.model_save_directory = finetune_working_directory
+            instance.verbose = verbose_training
+            if custom_step_loss_weight_range is not None: instance.forecast_step_loss_weight_range = custom_step_loss_weight_range
+            print(f"Training with forecast_step_loss_weight_range:\t\t{instance.forecast_step_loss_weight_range}\n")
+
+            # run training:
+            instance.run_training(custom_n_epochs=train_epochs, custom_early_stopping_patience=early_stopping_patience)
+
+        print(
+            f"All fine-tuned models have been saved to:\t\t{finetune_working_directory}\nConsider moving such to a structured location.")
+
 
     def _infer_predictor_name(self, architecture: str, val_hr: float, preset_type: str):
         """
