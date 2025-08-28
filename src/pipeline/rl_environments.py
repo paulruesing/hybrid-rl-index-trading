@@ -484,7 +484,8 @@ class RLTradingEnv(gym.Env):
                     print(f"    Cash: {self.cash}, Holding: {self.current_holding}")
 
                 # action callback:
-                trade_implementation_callback(isin = isin, amount = shares_to_buy, action = type.lower())
+                if trade_implementation_callback is not None:
+                    trade_implementation_callback(isin = isin, amount = shares_to_buy, action = type.lower())
 
         if type == 'Sell':
             # select all products with leverages inside span and higher:
@@ -509,9 +510,10 @@ class RLTradingEnv(gym.Env):
                 print(f"    Cash: {self.cash}, Holding: {self.current_holding}")
 
             # action callback:
-            if isinstance(shares_to_sell, pd.Series):  # if multiple shares to sell (can happen upon selling)
-                for isin, shares in zip(isins, shares_to_sell):
-                    trade_implementation_callback(isin=isin, amount=shares, action=type.lower())
+            if trade_implementation_callback is not None:
+                if isinstance(shares_to_sell, pd.Series):  # if multiple shares to sell (can happen upon selling)
+                    for isin, shares in zip(isins, shares_to_sell):
+                        trade_implementation_callback(isin=isin, amount=shares, action=type.lower())
 
     def next_episode(self):
         """
