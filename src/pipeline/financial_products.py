@@ -263,29 +263,59 @@ class KOCertificate:
         ax3.grid()
         fig.tight_layout()
 
-    def fix_initial_knockout(self) -> None:
-        """ Reduce base price below minimum of underlying price series to fix initial KO breach. """
+    def fix_initial_knockout(self, by: Literal['base_price', 'issue_date'] = 'base_price', abs_base_price_change_pa: float = None) -> None:
+        """
+        Fixes the initial knockout settings for a series based on specified criteria.
+
+        Parameters
+        ----------
+        by : Literal['base_price', 'issue_date'], optional
+            Determines the criterion to use for fixing the knockout settings.
+            'base_price' sets the lowest price and corresponding date as the base price.
+            'issue_date' sets the last knockout breach timestamp as the issue date.
+            Default is 'base_price'.
+
+        abs_base_price_change_pa : float, optional
+            Absolute annualized base price change to enforce. If one of the base price tuples
+            gets removed due to conflicts, the enforced annualized change will apply if provided.
+        """
         if self.is_ko_series.iloc[0]:
-            lowest_date = self.date_index[np.argmin(self.underlying_price_series)]
-            lowest_price = self.underlying_price_series.min()
-            self.date_base_price_tuple2 = (lowest_date, lowest_price * (1.05 if self.direction == 'short' else 0.95))
+            if by == 'base_price':
+                lowest_date = self.date_index[np.argmin(self.underlying_price_series)]
+                lowest_price = self.underlying_price_series.min()
+                self.date_base_price_tuple2 = (lowest_date, lowest_price * (1.05 if self.direction == 'short' else 0.95))
+            elif by == 'issue_date':
+                last_ko_date = self.timestamp_last_ko_breach
+                # if this leads to conflicting base_price definitions -> remove such inference points
+                if self.date_base_price_tuple is not None:
+                    if self.date_base_price_tuple[0] < last_ko_date:
+                        self._date_base_price_tuple = None
+                if self.date_base_price_tuple2 is not None:
+                    if self.date_base_price_tuple2[0] < last_ko_date:
+                        self._date_base_price_tuple2 = None
+
+                self.issue_date = last_ko_date
+
+                # if one of the tuples was removed and a base_price_change_pa to be set was provided
+                if abs_base_price_change_pa is not None:
+                    if self.date_base_price_tuple is None or self.date_base_price_tuple2 is None:
+                        self.enforce_base_price_increase_per_annum(abs_increase_pa=abs_base_price_change_pa)
 
     # todo: simplify try/except structure, make coherent with base_price_series property and base_price_change_per_annum
     def enforce_base_price_increase_per_annum(self, abs_increase_pa: float = .02) -> None:
         """
-        Adjusts base price values and dates based on the annual price increase and product direction.
+        Enforces a base price increase of the underlying price series on a per annum basis.
 
-        This function compares two initial base price tuples, recalculates one of them, and adjusts
-        the corresponding date by shifting it forward or backward (by a year or a month).
-        The recalculation factor is derived using the specified annual price increase and the
-        product's direction (long or short). The choice of which tuple to adjust depends on the
-        initial configurations.
+        This method adjusts the base price of a financial instrument while taking into account
+        its direction (long or short), the provided price increase rate, and the available data points.
+        If no second inference point exists, it determines a new one by evaluating and manipulating
+        the existing data point and inferring subsequent prices based on the time difference.
 
         Parameters
         ----------
         abs_increase_pa : float, optional
-            The absolute fractional increase in the base price applied per annum (e.g., 0.02
-            corresponds to a 2% increase per annum). Defaults to 0.02.
+            The absolute rate of annual price increase (default is 0.02, i.e., 2% per annum).
+            The sign is automatically adjusted based on the product's 'direction' (long or short).
 
         Returns
         -------
@@ -294,43 +324,55 @@ class KOCertificate:
         # sign based on product's direction
         price_change_pa = np.abs(abs_increase_pa) * (-1 if self.direction == 'short' else 1)
 
-        # if short product and the first base price inference point is higher or long product and second inference point is higher,
-        # keep the first inference point:
-        if (self.direction == 'short' and self.date_base_price_tuple[1] > self.date_base_price_tuple2[1]) or (
+        # keep the first inference point if
+        #   only the first point is provided or
+        #   is a short product and the first base price inference point is higher or long product and second inference point is higher
+        # keep the second inference point if
+        #   only the second point is provided
+        #   or elsewise
+        if self.date_base_price_tuple2 is None:
+            use_first_point = True
+        elif self.date_base_price_tuple is None:
+            use_first_point = False
+        elif (self.direction == 'short' and self.date_base_price_tuple[1] > self.date_base_price_tuple2[1]) or (
                 self.direction == 'long' and self.date_base_price_tuple[1] < self.date_base_price_tuple2[1]):
-
-            # in this case, the first tuple is the one to be kept:
-            try:  # set second date one year ahead:
-                date2 = self.date_base_price_tuple[0] + pd.Timedelta('364d')  # 364 equals exactly 52 weeks
-                _ = self.underlying_price_series[date2]
-                is_one_month = False
-            except KeyError:  # if +1 Year is beyond provided data, set date back one year:
-                try:
-                    date2 = self.date_base_price_tuple[0] - pd.Timedelta('364d')
-                    _ = self.underlying_price_series[date2]
-                    is_one_month = False
-                except KeyError:
-                    date2 = self.date_base_price_tuple[0] - pd.Timedelta('28d')
-                    _ = self.underlying_price_series[date2]
-                    is_one_month = True  # smaller timedelta (half year) leads to smaller base price change in below formula:
-
-            self.date_base_price_tuple2 = (date2, self.date_base_price_tuple[1] * ((1 + price_change_pa) ** (1/12 if is_one_month else 1)))
+            use_first_point = True
         else:
-            # in this case, keep the second:
-            try:  # set second date one year ahead:
-                date = self.date_base_price_tuple2[0] + pd.Timedelta('364d')  # 364 equals exactly 52 weeks
-                _ = self.underlying_price_series[date]  # try accessing date
+            use_first_point = False
+
+        # derive respective points
+        given_date = self.date_base_price_tuple[0] if use_first_point else self.date_base_price_tuple2[0]
+        given_price = self.date_base_price_tuple[1] if use_first_point else self.date_base_price_tuple2[1]
+
+        # derive new (second) date:
+        try:  # set second date one year ahead:
+            new_date = given_date + pd.Timedelta('364d')  # 364 equals exactly 52 weeks
+            _ = self.underlying_price_series[new_date]
+            is_one_month = False
+            is_earlier = False  # whether new_date is before given_date
+
+        except KeyError:  # if +1 Year is beyond provided data, set date back one year:
+            try:
+                new_date = given_date - pd.Timedelta('364d')
+                _ = self.underlying_price_series[new_date]
                 is_one_month = False
-            except KeyError:  # if +1 Year is beyond provided data, set date back one year:
-                try:
-                    date = self.date_base_price_tuple2[0] - pd.Timedelta('364d')
-                    _ = self.underlying_price_series[date]
-                    is_one_month = False
-                except KeyError:
-                    date = self.date_base_price_tuple2[0] - pd.Timedelta('28d')
-                    _ = self.underlying_price_series[date]
-                    is_one_month = True  # smaller timedelta (half year) leads to smaller base price change in below formula:
-            self.date_base_price_tuple = (date, self.date_base_price_tuple2[1] * ((1 + price_change_pa) ** (1/12 if is_one_month else 1)))
+                is_earlier = True
+            except KeyError:
+                new_date = given_date - pd.Timedelta('28d')
+                _ = self.underlying_price_series[new_date]
+                is_one_month = True  # smaller timedelta (half year) leads to smaller base price change in below formula:
+                is_earlier = True
+
+        # change sign if new date is earlier (because then new price has to be higher for series to decrease)
+        price_change_pa = price_change_pa * (-1 if is_earlier else 1)
+        new_price = given_price * ((1 + price_change_pa) ** (1/12 if is_one_month else 1))
+
+        # save as other inference point:
+        if use_first_point:
+            self.date_base_price_tuple2 = (new_date, new_price)
+        else:
+            self.date_base_price_tuple = (new_date, new_price)
+
 
     ### String representation ###
     def __str__(self) -> str:
@@ -421,31 +463,46 @@ class KOCertificate:
 
     @property
     def base_price_change_per_annum(self) -> float:
-        """ Annual base price increase resulting from base price series. Typical values are between 0.02 and 0.03."""
+        """ Annual base price increase resulting from base price series. Typical values are between 0.02 and 0.05."""
         if self._base_price_change_per_annum is None:  # is set to none if base price series is overwritten
+            if self.date_base_price_tuple is None or self.date_base_price_tuple2 is None:
+                raise ValueError("Only one base_price_tuple provided. Please call enforce_base_price_increase_per_annum() or set both base_price_tuples before calling this property.")
+
+
             start = self.base_price_series[self.date_base_price_tuple[0]]
 
             try:  # look one year ahead:
                 end = self.base_price_series[
                     self.date_base_price_tuple[0] + pd.Timedelta('364d')]  # 364 equals exactly 52 weeks
                 is_one_month = False
+                is_earlier = False  # whether end is before start
 
             except KeyError:  # if +1 Year is beyond provided data, look back one year:
                 try:
                     end = self.base_price_series[self.date_base_price_tuple[0] - pd.Timedelta('364d')]
                     is_one_month = False
+                    is_earlier = True
                 except KeyError:  # if 1 year is too large look 1 month
                     end = self.base_price_series[self.date_base_price_tuple[0] - pd.Timedelta('28d')]
                     is_one_month = True
+                    is_earlier = True
 
             # calculation:
             if end == start: return 0.0  # for leverage = 1 products this is relevant
-            self._base_price_change_per_annum = (end / start).item() ** (12 if is_one_month else 1) - 1  # if difference is from one month, convert to annual rate
+            change_pa = (end / start).item() ** (12 if is_one_month else 1) - 1  # if difference is from one month, convert to annual rate
+            change_pa *= -1 if is_earlier else 1  # correct sign if end was before start
+
+            # save:
+            self._base_price_change_per_annum = change_pa
 
         else:  # correct direction if attribute has already been provided
             self._base_price_change_per_annum = (np.abs(self._base_price_change_per_annum) * (-1 if self.direction == 'short' else 1)).item()
 
         return self._base_price_change_per_annum
+
+    @base_price_change_per_annum.setter
+    def base_price_change_per_annum(self, value):
+        self._base_price_change_per_annum = value
 
     @property
     def base_price_series(self):
@@ -985,6 +1042,7 @@ class KOCertificateSet:
 
     def get_leverage_availability(self, product_type: Literal["long", "short"],
                                   hour_minute_to_check: (int, int) = None,
+                                  since_date: pd.Timestamp = None,
                                   leverage_categories: [float] = None,
                                   include_open_leverage_category: bool = False,
                                   # if True, last category is open to inf.
@@ -997,8 +1055,10 @@ class KOCertificateSet:
             frame = self.short_leverage_frame
 
         # select timestamps to be scrutinized:
-        frame = frame.loc[
-            (frame.index.hour == hour_minute_to_check[0]) & (frame.index.minute == hour_minute_to_check[1])]
+        if hour_minute_to_check is not None:
+            frame = frame.loc[
+                (frame.index.hour == hour_minute_to_check[0]) & (frame.index.minute == hour_minute_to_check[1])]
+        if since_date is not None: frame = frame.loc[frame.index >= since_date]
 
         # check leverage availabilities:
         avail_frame = frame.apply(func=self._check_leverage_availability_per_row, axis='columns',
@@ -1009,8 +1069,11 @@ class KOCertificateSet:
         # print statement:
         if verbose:
             for column in avail_frame:
-                print(f'Availability of leverage >{column}:',
-                      avail_frame[column].value_counts()[True] / len(avail_frame) * 100, "%")
+                try:
+                    availability_percent = avail_frame[column].value_counts()[True] / len(avail_frame) * 100
+                except KeyError:
+                    availability_percent = 0
+                print(f'Availability of {product_type}s with leverage >{column}:', availability_percent, "%")
 
         return avail_frame
 
