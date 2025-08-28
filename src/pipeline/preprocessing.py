@@ -292,6 +292,9 @@ class StockPriceDataManager:
         price_series = price_frame[self.price_column]
 
         if self.include_scraped_downloads:
+            if datetime.now().hour < 15 or (datetime.now().hour == 15 and datetime.now().minute < 30) or datetime.now().hour > 20:
+                print(f"Scrape does only work between 15.30 and 20.00 BER-time. Skipping scraped download.")
+                return price_series
             scrape_series = webinteraction.fetch_price_from_comdirect(raw_download_dir=self.scrape_raw_download_dir,
                                                                       url=self.scrape_url_comdirect,
                                                                       )
