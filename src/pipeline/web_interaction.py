@@ -1,6 +1,7 @@
 import src.utils.str_conversion as strconv
 import src.utils.file_management as filemgmt
 
+import time
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -197,3 +198,164 @@ def fetch_price_from_comdirect(raw_download_dir: Path,
     # return sorted series:
     price_series = formatted_frame.set_index('datetime')['price']
     return price_series.sort_index()
+
+
+def wait_for_then_locate_element(driver: webdriver.Chrome, xpath: str, timeout: int = 20):
+    """
+    Waits for a web element to be present in the DOM, located by the given XPath, before returning the element.
+
+    Parameters
+    ----------
+    driver : webdriver.Chrome
+        The web driver instance controlling the browser session.
+    xpath : str
+        The XPath of the web element to locate.
+    timeout : int, optional
+        The maximum number of seconds to wait for the element to be located (default is 20).
+
+    Returns
+    -------
+    WebElement
+        The located web element once it becomes available in the DOM.
+
+    Raises
+    ------
+    TimeoutException
+        If the web element is not located within the specified timeout.
+    """
+    WebDriverWait(driver, timeout).until(
+        EC.presence_of_element_located((By.XPATH, xpath))
+    )
+    return driver.find_element(By.XPATH, xpath)
+
+
+def login_to_wikifolio(username: str, password: str, wikifolio_id: str = "wfprtresen",
+                       driver_executable_path="") -> webdriver.Chrome:
+    """
+    Logs into the specified Wikifolio account and navigates to the desired page.
+
+    This function automates the process of logging into a Wikifolio account using a given set
+    of credentials and navigates to a specific Wikifolio ID page using a Selenium-based web driver.
+    The function also handles common popups like cookie notices and region confirmation dialogs.
+
+    Parameters
+    ----------
+    username : str
+        The username or email address used for logging into the Wikifolio account.
+    password : str
+        The password associated with the specified username.
+    wikifolio_id : str, optional
+        The ID of the target Wikifolio page to be accessed after login.
+        Defaults to "wfprtresen".
+    driver_executable_path : str, optional
+        Path to the ChromeDriver executable. If not provided, Selenium will use the default
+        configured executable.
+
+    Returns
+    -------
+    webdriver.Chrome
+        An instance of the active Chrome WebDriver session after a successful login.
+    """
+    url = f"https://www.wikifolio.com/de/de/meine-wikifolios/trade/{wikifolio_id.lower()}"
+
+    service = Service(executable_path=driver_executable_path)
+    driver = webdriver.Chrome(service=service)  # opens window, do not close!
+    driver.get(url)
+
+    # cookie button:
+    wait_for_then_locate_element(driver, "/html/body/div[1]/div/div[4]/div[1]/div/div[2]/button[2]").click()
+
+    # region button (appears after mouse movement)
+    time.sleep(1)
+    actions = webdriver.ActionChains(driver)
+    actions.move_by_offset(10, 5).perform()  # moves mouse 10px right, 5px down from current position
+    wait_for_then_locate_element(driver, "/html/body/div[7]/div[3]/div/section/footer/div/button").click()
+
+    # login query button:
+    wait_for_then_locate_element(driver, "/html/body/div[5]/div[3]/div/section/div/div[1]/button").click()
+
+    # input login data:
+    wait_for_then_locate_element(driver, "/html/body/div[5]/div[3]/div/section/div/form/div/div[1]/input").send_keys(
+        username)
+    wait_for_then_locate_element(driver, "/html/body/div[5]/div[3]/div/section/div/form/div/div[2]/input").send_keys(
+        password)
+    # submit:
+    wait_for_then_locate_element(driver, "/html/body/div[5]/div[3]/div/section/div/form/div/button").click()
+
+    return driver
+
+
+def add_products_to_wikifolio(driver: webdriver.Chrome, isins_to_add: list[str]):
+    """
+    Adds a list of products identified by their ISINs to a wikifolio.
+
+    Parameters
+    ----------
+    driver : webdriver.Chrome
+        An instance of Chrome WebDriver. The driver must be logged in to wikifolio.
+    isins_to_add : list[str]
+        A list of ISINs to add to the wikifolio. If an ISIN is already included, no action will be taken for it.
+
+    """
+    ### add isins from provided list (if already included, doesn't matter)
+    # driver has to be logged into wikifolio already
+    if isins_to_add is not None:
+        for isin in isins_to_add:
+            add_isin_input = wait_for_then_locate_element(driver,
+                                                          "/html/body/div[3]/main/div[3]/div[2]/div[1]/div/div/div[1]/div[2]/div/div/div[2]/div[1]/div[1]/div/div[2]/div/span[1]/input[2]")
+            add_isin_input.send_keys(isin)  # slow down to prevent errors
+            add_product_button = wait_for_then_locate_element(driver,
+                                                              "/html/body/div[3]/main/div[3]/div[2]/div[1]/div/div/div[1]/div[2]/div/div/div[2]/div[1]/div[1]/div/div[2]/div/span[1]/div/div/div[2]")
+            add_product_button.click()
+            time.sleep(2)  # slow down to prevent errors
+
+
+def scrape_portfolio_holdings_from_wikifolio(driver: webdriver.Chrome) -> tuple[float, float, dict[str, float]]:
+    """
+    Scrapes portfolio holdings from a logged-in Wikifolio account.
+
+    This function extracts data about the cash balance, total portfolio value, and shares per ISIN from a specific table on the Wikifolio website. It requires the user to already be logged into their Wikifolio account before calling this function.
+
+    Parameters
+    ----------
+    driver : webdriver.Chrome
+        A Selenium WebDriver instance that must already be logged into Wikifolio and pointing to the relevant portfolio page.
+
+    Returns
+    -------
+    tuple[float, float, dict[str, float]]
+        A tuple containing:
+        - `wf_cash` : The cash balance in the portfolio.
+        - `wf_total` : The total value of the portfolio.
+        - `shares_p_isin_dict` : A dictionary mapping ISINs (International Securities Identification Numbers) to the number of shares held for each.
+    """
+    # driver has to be logged into wikifolio (login_to_wikifolio method) already
+
+    ### fetch shares per isin:
+    shares_p_isin_dict = {}
+    # locate relevant table:
+    product_table = wait_for_then_locate_element(driver,
+                                                 "/html/body/div[3]/main/div[3]/div[2]/div[1]/div/div/div[1]/div[2]/div/div/div[1]/div/div/table/tbody")
+    product_table_rows = product_table.find_elements(By.XPATH, "tr")
+    for row_ind, row in enumerate(product_table_rows):
+        # skip irrelevant rows
+        if row_ind == 0:
+            continue  # column label row
+        elif row_ind == len(product_table_rows) - 2:  # cash
+            wf_cash_entry = row.find_element(By.XPATH, "td[4]/div")
+            wf_cash = strconv.str_to_float(wf_cash_entry.text)
+            continue
+        elif row_ind == len(product_table_rows) - 1:  # portfolio value
+            wf_total_entry = row.find_element(By.XPATH, "td[4]/div")
+            wf_total = strconv.str_to_float(wf_total_entry.text)
+            continue
+
+        # fetch and convert relevant entries:
+        isin_entry = row.find_element(By.XPATH, "td[1]/div/div/div")
+        isin = isin_entry.text
+        shares_count_entry = row.find_element(By.XPATH, "td[3]/div")
+        shares_count = strconv.str_to_float(shares_count_entry.text)
+
+        shares_p_isin_dict[isin] = shares_count
+
+    return wf_cash, wf_total, shares_p_isin_dict
