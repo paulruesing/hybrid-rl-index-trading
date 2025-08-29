@@ -763,9 +763,18 @@ class RLTradingEnv(gym.Env):
     def current_avg_scaled_predicted_potential(self):
         """ Current average predicted potential for next potential_horizon_days (part of current_observation). """
         potential_list = np.array([])
+        for horizon_minutes, potential in zip(self.observation_horizons_minutes, self.current_potential_estimates):
+            # todo: think whether this 24 needs to 14 (business day duration) because observation_horizons_minutes uses such indirectly
+            potential = potential / horizon_minutes * self.potential_horizon_days * 24 * 60  # scale per minute and then to per self.potential_horizon_days days
+
+            potential_list = np.append(potential_list, [potential])
+        return np.nanmean(potential_list).item()
+
+        potential_list = np.array([])
         for type, horizon_minutes, potential in zip(self.observation_types, self.observation_horizons_minutes, self.current_observation):
             if type != 'potential': continue
             # todo: think whether this 24 needs to 14 (business day duration) because observation_horizons_minutes uses such indirectly
+            # likely should be, but than the manual agent needs to be reworked!!! (by a calculatable factor)
             potential = potential / horizon_minutes * self.potential_horizon_days * 24 * 60  # scale per minute and then to per self.potential_horizon_days days
             potential_list = np.append(potential_list, [potential])
         return np.nanmean(potential_list).item()
