@@ -647,7 +647,7 @@ class RLTradingEnv(gym.Env):
 
     @product_set.setter
     def product_set(self, value: KOCertificateSet):
-        """ product_set setter. Resets action space. """
+        """ product_set setter. """
         self._product_set = value
 
     @property
