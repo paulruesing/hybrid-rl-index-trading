@@ -7,6 +7,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import ElementClickInterceptedException
 
 from pathlib import Path
 import pandas as pd
@@ -64,6 +65,9 @@ def fetch_future_info_from_boerse_fra(isin: str, driver_executable_path: str):
     driver = webdriver.Chrome(service=service)  # opens window, do not close!
     driver.get(url)
 
+    # Set zoom to 50% (zoom out) to prevent display size issues
+    driver.execute_script("document.body.style.zoom='50%'")
+
     # wait until page is loaded (based on presence of "button" table):
     WebDriverWait(driver, 5).until(
         EC.presence_of_element_located((By.CSS_SELECTOR,
@@ -74,7 +78,7 @@ def fetch_future_info_from_boerse_fra(isin: str, driver_executable_path: str):
     stammdaten_button = driver.find_elements(By.CSS_SELECTOR,
                                              ".ng-star-inserted .d-flex.flex-nowrap .widget-container-v2 .content-wrapper .ng-star-inserted")[7]  # .find_elements(By.CSS_SELECTOR, ".")
     highlight_element(stammdaten_button)
-    stammdaten_button.click()
+    safe_click_element(driver, stammdaten_button)
 
     # wait until new page is loaded (based on presence of "kennzahlen" table):
     WebDriverWait(driver, 5).until(
@@ -152,34 +156,23 @@ def fetch_price_from_comdirect(raw_download_dir: Path,
     driver = webdriver.Chrome(service=service, options=chrome_options)  # opens window, do not close!
     driver.get(url)
 
+    # Set zoom to 50% (zoom out) to prevent display size issues
+    driver.execute_script("document.body.style.zoom='50%'")
+
     # wait until page is loaded (based on presence of cookie pop-up):
-    WebDriverWait(driver, 5).until(
-        EC.presence_of_element_located((By.XPATH, "/html/body/com-consent-layer"))
-    )
-
-    # accept cookie button (is hidden in shadow-subtree)
-    pop_up = driver.find_elements(By.XPATH, "/html/body/com-consent-layer")[0]
+    pop_up = wait_for_then_locate_element(driver, "/html/body/com-consent-layer")
     pop_up = pop_up.shadow_root  # access shadow subtree
-
-    # locate and click
     cookie_button = pop_up.find_element(By.CSS_SELECTOR,
                                         "dialog div div com-button-area com-button")  # > div:nth-child(2) > div:nth-child(2) > com-button-area > com-button:nth-child(1)")
-    cookie_button.click()
+    safe_click_element(driver, cookie_button)
 
     # open quote list button:
-    quote_button = driver.find_elements(By.ID, "openQuoteListButton")[0]
-    quote_button.click()
+    quote_button = wait_for_then_locate_element(driver, id="openQuoteListButton")
+    safe_click_element(driver, quote_button)
 
     # wait until download pop-up is loaded (based on presence of "button" table):
-    WebDriverWait(driver, 5).until(
-        EC.presence_of_element_located((By.XPATH, "/html/body/div[15]/div/div[2]/div/div/div/div/div/div/div[2]/div/a"))
-    )
-
-    # download quotes:
-    download_button = \
-    driver.find_elements(By.XPATH, "/html/body/div[15]/div/div[2]/div/div/div/div/div/div/div[2]/div/a")[
-        0]
-    download_button.click()
+    download_button = wait_for_then_locate_element(driver, xpath="/html/body/div[15]/div/div[2]/div/div/div/div/div/div/div[2]/div/a")
+    safe_click_element(driver, download_button)
 
     if verbose: print("Successfully downloaded price data from comdirect.")
 
@@ -199,34 +192,78 @@ def fetch_price_from_comdirect(raw_download_dir: Path,
     price_series = formatted_frame.set_index('datetime')['price']
     return price_series.sort_index()
 
-
-def wait_for_then_locate_element(driver: webdriver.Chrome, xpath: str, timeout: int = 20):
+def safe_click_element(driver: webdriver.Chrome, element):
     """
-    Waits for a web element to be present in the DOM, located by the given XPath, before returning the element.
+    Attempts to safely click on a web element by scrolling it into view and retrying up to three times
+    before raising an exception. This is useful for handling cases where elements are not immediately
+    clickable due to overlays or timing issues.
 
     Parameters
     ----------
     driver : webdriver.Chrome
-        The web driver instance controlling the browser session.
-    xpath : str
-        The XPath of the web element to locate.
+        The instance of the Chrome WebDriver interacting with the web page.
+    element
+        The web element to be clicked.
+
+    Raises
+    ------
+    ElementClickInterceptedException
+        Raised if the element cannot be clicked successfully after three attempts.
+    """
+    driver.execute_script("arguments[0].scrollIntoView(true);", element)
+
+    # 3 attempts to click:
+    for attempt in range(3):
+        try:
+            element.click()
+            return
+        except ElementClickInterceptedException:
+            time.sleep(2)
+
+    # otherwise raise error:
+    raise ElementClickInterceptedException("Failed to click element.")
+
+def wait_for_then_locate_element(driver: webdriver.Chrome, xpath: str = None, id: str = None, timeout: int = 20):
+    """
+    Waits for an element to become present in the DOM and then locates it using either its
+    XPath or ID. This function employs WebDriverWait to ensure the desired web element
+    is available before attempting to locate it. If neither `xpath` nor `id` is provided, it
+    raises a ValueError.
+
+    Parameters
+    ----------
+    driver : webdriver.Chrome
+        The Selenium WebDriver instance used to interact with the browser.
+    xpath : str, optional
+        The XPath of the web element to locate. Defaults to None.
+    id : str, optional
+        The ID of the web element to locate. Defaults to None.
     timeout : int, optional
-        The maximum number of seconds to wait for the element to be located (default is 20).
+        The maximum time to wait (in seconds) for the element to appear in the DOM.
+        Defaults to 20 seconds.
 
     Returns
     -------
     WebElement
-        The located web element once it becomes available in the DOM.
+        The located web element using the provided XPath or ID.
 
     Raises
     ------
-    TimeoutException
-        If the web element is not located within the specified timeout.
+    ValueError
+        If neither `xpath` nor `id` is provided.
     """
-    WebDriverWait(driver, timeout).until(
-        EC.presence_of_element_located((By.XPATH, xpath))
-    )
-    return driver.find_element(By.XPATH, xpath)
+    if xpath is not None:
+        WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((By.XPATH, xpath))
+        )
+        return driver.find_element(By.XPATH, xpath)
+    elif id is not None:
+        WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((By.ID, id))
+        )
+        return driver.find_element(By.ID, id)
+    else:
+        raise ValueError("Either xpath or id must be provided!")
 
 
 def login_to_wikifolio(username: str, password: str, wikifolio_id: str = "wfprtresen",
@@ -262,17 +299,23 @@ def login_to_wikifolio(username: str, password: str, wikifolio_id: str = "wfprtr
     driver = webdriver.Chrome(service=service)  # opens window, do not close!
     driver.get(url)
 
+    # Set zoom to 50% (zoom out) to prevent display size issues
+    driver.execute_script("document.body.style.zoom='50%'")
+
     # cookie button:
-    wait_for_then_locate_element(driver, "/html/body/div[1]/div/div[4]/div[1]/div/div[2]/button[2]").click()
+    cookie_button = wait_for_then_locate_element(driver, "/html/body/div[1]/div/div[4]/div[1]/div/div[2]/button[2]")
+    safe_click_element(driver, cookie_button)
 
     # region button (appears after mouse movement)
     time.sleep(1)
     actions = webdriver.ActionChains(driver)
     actions.move_by_offset(10, 5).perform()  # moves mouse 10px right, 5px down from current position
-    wait_for_then_locate_element(driver, "/html/body/div[7]/div[3]/div/section/footer/div/button").click()
+    region_button = wait_for_then_locate_element(driver, "/html/body/div[7]/div[3]/div/section/footer/div/button")
+    safe_click_element(driver, region_button)
 
     # login query button:
-    wait_for_then_locate_element(driver, "/html/body/div[5]/div[3]/div/section/div/div[1]/button").click()
+    login_query_button = wait_for_then_locate_element(driver, "/html/body/div[5]/div[3]/div/section/div/div[1]/button")
+    safe_click_element(driver, login_query_button)
 
     # input login data:
     wait_for_then_locate_element(driver, "/html/body/div[5]/div[3]/div/section/div/form/div/div[1]/input").send_keys(
@@ -280,7 +323,8 @@ def login_to_wikifolio(username: str, password: str, wikifolio_id: str = "wfprtr
     wait_for_then_locate_element(driver, "/html/body/div[5]/div[3]/div/section/div/form/div/div[2]/input").send_keys(
         password)
     # submit:
-    wait_for_then_locate_element(driver, "/html/body/div[5]/div[3]/div/section/div/form/div/button").click()
+    submit_button = wait_for_then_locate_element(driver, "/html/body/div[5]/div[3]/div/section/div/form/div/button")
+    safe_click_element(driver, submit_button)
 
     return driver
 
@@ -297,6 +341,9 @@ def add_products_to_wikifolio(driver: webdriver.Chrome, isins_to_add: list[str])
         A list of ISINs to add to the wikifolio. If an ISIN is already included, no action will be taken for it.
 
     """
+    # Set zoom to 50% (zoom out) to prevent display size issues
+    driver.execute_script("document.body.style.zoom='50%'")
+
     ### add isins from provided list (if already included, doesn't matter)
     # driver has to be logged into wikifolio already
     if isins_to_add is not None:
@@ -306,37 +353,46 @@ def add_products_to_wikifolio(driver: webdriver.Chrome, isins_to_add: list[str])
             add_isin_input.send_keys(isin)  # slow down to prevent errors
             add_product_button = wait_for_then_locate_element(driver,
                                                               "/html/body/div[3]/main/div[3]/div[2]/div[1]/div/div/div[1]/div[2]/div/div/div[2]/div[1]/div[1]/div/div[2]/div/span[1]/div/div/div[2]")
-            add_product_button.click()
+            safe_click_element(driver, add_product_button)
             time.sleep(2)  # slow down to prevent errors
 
 
-def scrape_portfolio_holdings_from_wikifolio(driver: webdriver.Chrome) -> tuple[float, float, dict[str, float]]:
+def scrape_portfolio_holdings_from_wikifolio(driver: webdriver.Chrome) -> tuple[float, float, dict[str, float], dict[str, float]]:
     """
-    Scrapes portfolio holdings from a logged-in Wikifolio account.
-
-    This function extracts data about the cash balance, total portfolio value, and shares per ISIN from a specific table on the Wikifolio website. It requires the user to already be logged into their Wikifolio account before calling this function.
+    Scrapes portfolio holdings data, including cash, total portfolio value, and holdings details, from a logged-in Wikifolio account.
 
     Parameters
     ----------
     driver : webdriver.Chrome
-        A Selenium WebDriver instance that must already be logged into Wikifolio and pointing to the relevant portfolio page.
+        Selenium WebDriver instance logged into a Wikifolio account.
 
     Returns
     -------
-    tuple[float, float, dict[str, float]]
-        A tuple containing:
-        - `wf_cash` : The cash balance in the portfolio.
-        - `wf_total` : The total value of the portfolio.
-        - `shares_p_isin_dict` : A dictionary mapping ISINs (International Securities Identification Numbers) to the number of shares held for each.
+    tuple
+        A tuple containing the following:
+        - wf_cash (float): The cash amount available in the portfolio.
+        - wf_total (float): The total value of the portfolio.
+        - shares_p_isin_dict (dict[str, float]): A dictionary mapping ISINs to the count of shares held.
+        - price_p_isin_dict (dict[str, float]): A dictionary mapping ISINs to the price per share.
+
+    Notes
+    -----
+    This method assumes that the WebDriver has already been logged into a Wikifolio account using an appropriate login method.
     """
+    # Set zoom to 50% (zoom out) to prevent display size issues
+    driver.execute_script("document.body.style.zoom='50%'")
+
     # driver has to be logged into wikifolio (login_to_wikifolio method) already
 
-    ### fetch shares per isin:
-    shares_p_isin_dict = {}
+    # prepare per isin dicts:
+    shares_p_isin_dict = {}; price_p_isin_dict = {}
+
     # locate relevant table:
     product_table = wait_for_then_locate_element(driver,
                                                  "/html/body/div[3]/main/div[3]/div[2]/div[1]/div/div/div[1]/div[2]/div/div/div[1]/div/div/table/tbody")
     product_table_rows = product_table.find_elements(By.XPATH, "tr")
+
+    # iterate over table rows to fetch values:
     for row_ind, row in enumerate(product_table_rows):
         # skip irrelevant rows
         if row_ind == 0:
@@ -353,9 +409,14 @@ def scrape_portfolio_holdings_from_wikifolio(driver: webdriver.Chrome) -> tuple[
         # fetch and convert relevant entries:
         isin_entry = row.find_element(By.XPATH, "td[1]/div/div/div")
         isin = isin_entry.text
+
+        price_entry = row.find_element(By.XPATH, "td[2]/span/div")
+        price = strconv.str_to_float(price_entry.text)
+
         shares_count_entry = row.find_element(By.XPATH, "td[3]/div")
         shares_count = strconv.str_to_float(shares_count_entry.text)
 
         shares_p_isin_dict[isin] = shares_count
+        price_p_isin_dict[isin] = price
 
-    return wf_cash, wf_total, shares_p_isin_dict
+    return wf_cash, wf_total, shares_p_isin_dict, price_p_isin_dict
