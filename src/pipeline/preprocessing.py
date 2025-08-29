@@ -316,8 +316,8 @@ class StockPriceDataManager:
 
     @property
     def downloaded_data_time_range(self) -> (pd.Timestamp, pd.Timestamp):
-        """ Time range of downloaded data. """
-        date_times = self.downloaded_prices.index  # we assume all time ranges are equal because all are updated jointly
+        """ Time range of downloaded data (not including scraped data). """
+        date_times = self.downloaded_price_frame.index  # we assume all time ranges are equal because all are updated jointly
         return date_times.min(), date_times.max()
 
     #### Methods ####
