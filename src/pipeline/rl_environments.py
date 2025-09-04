@@ -18,6 +18,55 @@ import enum
 from pathlib import Path
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from typing import Literal
+from datetime import datetime
+
+
+# todo: implement action execution and set "completed" to True
+class TradeImplementor:
+    """
+    TradeImplementor is a class designed to manage and log trade actions such as buying or selling assets.
+
+    Methods
+    -------
+    __init__ :
+        Initializes the TradeImplementor instance and sets up an empty action log.
+    __call__(isin: str, amount: int, action: Literal['buy', 'sell']) :
+        Captures and logs trade action details along with a timestamp.
+
+    Parameters
+    ----------
+    __call__
+        isin : str
+            The International Securities Identification Number (ISIN) of the asset being traded.
+        amount : int
+            The amount of units being traded.
+        action : Literal['buy', 'sell']
+            Specifies the type of trade action. Must be either 'buy' or 'sell'.
+
+    Attributes
+    ----------
+    action_log : dict
+        A dictionary that stores logged trade actions. Each entry contains a timestamp as the key and a dictionary with trade details as the value.
+    """
+    def __init__(self):
+        self.action_log = {}
+
+    def __call__(self, isin: str, amount: int, action: Literal['buy', 'sell']):
+        """
+        Records an action (buy or sell) for a financial instrument with the given ISIN and amount into a log.
+
+        Parameters
+        ----------
+        isin : str
+            The International Securities Identification Number (ISIN) of the financial instrument being traded.
+        amount : int
+            The quantity of the financial instrument to be traded.
+        action : Literal['buy', 'sell']
+            The type of transaction to record, either 'buy' or 'sell'.
+        """
+        today = datetime.today().strftime('%Y-%m-%d %H_%M_%S')
+        self.action_log[today] = {"isin": isin, "amount": amount, "action": action, "completed": False}
 
 
 class RLTradingEnv(gym.Env):
