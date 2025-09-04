@@ -24,10 +24,9 @@ def get_text_message_input(recipient, text):
         }
     )
 
-
-# todo: improve logic
 def generate_response(response):
     # Return text in uppercase
+    print("Using the default 'shouting'-response generator.\nPlease implement custom response logic by providing a callable function that takes str as input and returns str as output.\nSuch function needs to be saved under app.config['CUSTOM_RESPONSE_FUNCTION'] when initialising the app!")
     return response.upper()
 
 
@@ -76,15 +75,27 @@ def process_text_for_whatsapp(text):
     return whatsapp_style_text
 
 
-def process_whatsapp_message(body):
+def process_whatsapp_message(body, custom_response_function: callable = None):
+    """
+    Processes incoming WhatsApp messages and sends a response.
+
+    Uses a pre-defined response generation function or a custom response handler function provided as a parameter. Extracts message and user information from the incoming WhatsApp message body, generates a response, prepares it for WhatsApp, and sends it back.
+
+    Parameters
+    ----------
+    body : dict
+        The incoming WhatsApp message payload containing message details, user ID, and profile information.
+    custom_response_function : callable, optional
+        A custom function provided to generate a response based on the incoming message body. If not provided, a default response generation function is used.
+    """
     wa_id = body["entry"][0]["changes"][0]["value"]["contacts"][0]["wa_id"]
     name = body["entry"][0]["changes"][0]["value"]["contacts"][0]["profile"]["name"]
 
     message = body["entry"][0]["changes"][0]["value"]["messages"][0]
     message_body = message["text"]["body"]
 
-    # TODO: implement custom function here
-    response = generate_response(message_body)
+    # either use provided custom response function or pre-defined generate_response() in this script
+    response = generate_response(message_body) if custom_response_function is None else custom_response_function(message_body)
 
     # OpenAI Integration
     # response = generate_response(message_body, wa_id, name)

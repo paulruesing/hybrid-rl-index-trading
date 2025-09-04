@@ -12,19 +12,26 @@ from .utils.whatsapp_utils import (
 webhook_blueprint = Blueprint("webhook", __name__)
 
 
-def handle_message():
+def handle_message(custom_response_function: callable = None):
     """
-    Handle incoming webhook events from the WhatsApp API.
+    Handles incoming HTTP messages, validates if they are WhatsApp API messages, and processes them appropriately.
 
-    This function processes incoming WhatsApp messages and other events,
-    such as delivery statuses. If the event is a valid message, it gets
-    processed. If the incoming payload is not a recognized WhatsApp event,
-    an error is returned.
+    Parameters
+    ----------
+    custom_response_function : callable, optional
+        A custom function provided by the user to handle WhatsApp message responses. If not provided, the default processing logic will be used.
 
-    Every message send will trigger 4 HTTP requests to your webhook: message, sent, delivered, read.
+    Returns
+    -------
+    flask.Response
+        A JSON response indicating the status of the request, with an appropriate HTTP status code. Possible status codes include:
+        - 200: Indicates a successful processing of the WhatsApp message or status update.
+        - 404: Indicates the request is not identified as a WhatsApp API event.
+        - 400: Indicates there was an issue with decoding the JSON data.
 
-    Returns:
-        response: A tuple containing a JSON response and an HTTP status code.
+    Raises
+    ------
+    None
     """
     body = request.get_json()
     # logging.info(f"request body: {body}")
@@ -41,7 +48,7 @@ def handle_message():
 
     try:
         if is_valid_whatsapp_message(body):
-            process_whatsapp_message(body)
+            process_whatsapp_message(body, custom_response_function=custom_response_function)
             return jsonify({"status": "ok"}), 200
         else:
             # if the request is not a WhatsApp API event, return an error
@@ -84,6 +91,10 @@ def webhook_get():
 @webhook_blueprint.route("/webhook", methods=["POST"])
 @signature_required
 def webhook_post():
-    return handle_message()
+    try:
+        custom_func = current_app.config['CUSTOM_RESPONSE_FUNCTION']
+    except KeyError:
+        custom_func = None
+    return handle_message(custom_response_function=custom_func)
 
 
