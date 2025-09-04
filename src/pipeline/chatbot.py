@@ -83,14 +83,17 @@ class WhatsAppChatbot:
     @staticmethod
     def _get_text_message_input(recipient, text):
         """
-        Prepare data for _send_message method.
-
         Parameters
         ----------
         recipient : str
-            The phone number or unique identifier of the message recipient.
+            The recipient's identifier (e.g., phone number) for sending the message.
         text : str
-            The body of the text message to be sent.
+            The content of the text message to be sent.
+
+        Returns
+        -------
+        str
+            A JSON-encoded string representing the structure of a text message input for the WhatsApp messaging product.
         """
         return json.dumps(
             {
@@ -104,19 +107,22 @@ class WhatsAppChatbot:
 
     def _send_message_backend(self, data):
         """
-        Sends a message using the Facebook Graph API.
+        Sends a message to the backend via a POST request using the Facebook Graph API.
 
         Parameters
         ----------
         data : dict
-            The JSON payload to be sent in the HTTP POST request body.
-        verbose : bool, optional
-            If True, prints the status code, response headers, and response body for debugging. Default is False.
+            JSON payload containing the message data to be sent.
 
         Returns
         -------
-        response : requests.Response
-            The HTTP response object returned by the API call.
+        requests.Response
+            The HTTP response object received from the API call.
+
+        Notes
+        -----
+        This method requires a valid access token for authentication and an appropriate phone number ID.
+        Error and status information is printed when `self.verbose` is set to True.
         """
         headers = {
             "Content-type": "application/json",
@@ -137,3 +143,39 @@ class WhatsAppChatbot:
                 print(response.status_code)
                 print(response.text)
             return response
+
+    def test_connection(self):
+        """
+        Tests the connection to the Facebook Graph API for sending WhatsApp messages. Try this, if the API
+        returns a successful status code but doesn't actually send the message.
+
+        Sends a test message using the "hello_world" template to verify connectivity
+        and proper authorization credentials.
+
+        Parameters
+        ----------
+        self : object
+            The instance of the class containing access token, phone number ID,
+            API version, and recipient WhatsApp ID attributes.
+
+        Returns
+        -------
+        None
+            Sends a test message to validate the connection. If `self.verbose` is True,
+            prints the response status code and response text from the API call.
+        """
+        url = f"https://graph.facebook.com/{self._version}/{self._phone_number_id}/messages"
+        headers = {
+            "Authorization": "Bearer " + self._access_token,
+            "Content-Type": "application/json",
+        }
+        data = {
+            "messaging_product": "whatsapp",
+            "to": self._recipient_waid,
+            "type": "template",
+            "template": {"name": "hello_world", "language": {"code": "en_US"}},
+        }
+        response = requests.post(url, headers=headers, json=data)
+        if self.verbose:
+            print(response.status_code)
+            print(response.text)
