@@ -1792,17 +1792,19 @@ class PredictorManager:
         if initialisation_dir is not None:
             self.add_predictors_from_dir(initialisation_dir, **initialisation_kwargs)
 
-    def describe_preset_types(self):
+    def describe_preset_types(self) -> str:
         """
-        Prints a formatted description of each preset based on self.preset_type_dict.
+        Summarizes and describes all preset configurations stored in the preset_type_dict attribute.
 
-        Each preset includes:
-        - Sampling Rate (seconds, minutes, hours, or days)
-        - Rolling Window
-        - Forecast Horizon
-        - Prediction Hour
+        The method generates a detailed string representation for each preset, containing various configuration parameters, such as sampling rate, rolling window size, forecast horizon, and prediction time. It dynamically determines the appropriate time units (e.g., minutes, hours, days, weeks) based on the sampling rate, and scales other parameters accordingly.
+
+        Returns
+        -------
+        str
+            A formatted string detailing all preset configurations, including calculated values and descriptions.
         """
-        print("Preset Details:\n")
+        output_str = "Preset Details:\n\n"
+
         for preset_name, (
         sampling_rate, prediction_hour, _, rolling_window, forecast_horizon) in self.preset_type_dict.items():
             # Scale sampling rate to appropriate time units
@@ -1820,12 +1822,13 @@ class PredictorManager:
                 rate_unit = "week(s)"
 
             # Formatted output for the preset
-            print(f"Preset '{preset_name}':")
-            print(f"  - Sampling Rate: {rate_value} {rate_unit}")
-            print(f"  - Rolling Window Size: {rolling_window * rate_value} {rate_unit}")
-            print(f"  - Forecast Horizon: {forecast_horizon * rate_value} {rate_unit}")
-            print(f"  - Prediction Time: {prediction_hour}.00")
-            print("-" * 50)
+            output_str += f"Preset '{preset_name}':\n"
+            output_str += f"  - Sampling Rate: {rate_value} {rate_unit}\n"
+            output_str += f"  - Rolling Window Size: {rolling_window * rate_value} {rate_unit}\n"
+            output_str += f"  - Forecast Horizon: {forecast_horizon * rate_value} {rate_unit}\n"
+            output_str += f"  - Prediction Time: {prediction_hour}.00\n\n"
+
+        return output_str
 
     def add_predictor(self, name: str = None, file_path: str = None, architecture: str = None, preset_type: str = None):
         """

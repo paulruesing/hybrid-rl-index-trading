@@ -157,6 +157,9 @@ def describe_workflows() -> str:
             output += f"{label}: {entry}\n"
     return output
 
+def describe_predictor_presets() -> str:
+    return pred_manager.describe_preset_types()
+
 
 ###################### WORKFLOW FUNCTIONS ######################
 # todo: SUNDAYS -> pred_manager.fine_tune_predictors() -> then reinitialise_pred_manager
@@ -271,9 +274,12 @@ def responsive_workflow_process(shared_input_str, shared_output_str, chatbot_inp
                 "describe open positions": describe_open_positions,
                 "describe predictors": describe_predictors,
                 "describe workflows": describe_workflows,
+                "describe predictor presets": describe_predictor_presets,
             }
             if input_str.lower() in request_map:
                 output = str(request_map[input_str.lower()]())
+            elif "describe " + input_str.lower().strip() in request_map:
+                output = str(request_map["describe " + input_str.lower().strip()]())
             else:
                 output = "*Possible inputs are:*\n\n" + "\n".join(request_map.keys())
 
