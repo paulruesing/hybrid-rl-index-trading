@@ -6,6 +6,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support.select import Select
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import ElementClickInterceptedException
 
@@ -170,8 +171,18 @@ def fetch_price_from_comdirect(raw_download_dir: Path,
     quote_button = wait_for_then_locate_element(driver, id="openQuoteListButton")
     safe_click_element(driver, quote_button)
 
+    # amend time resolution of quotes:
+    interval_dropdown_element = wait_for_then_locate_element(driver,
+                                                             "/html/body/div[17]/div/div[2]/div/div/div/div/div/div/form/div[2]/div/div[2]/div[2]/div/div/select")
+    interval_dropdown = Select(interval_dropdown_element)
+    interval_dropdown.select_by_visible_text("15 Minuten")
+    update_button = wait_for_then_locate_element(driver,
+                                                 "/html/body/div[17]/div/div[2]/div/div/div/div/div/div/form/div[3]/div/button")
+    safe_click_element(driver, update_button)
+
     # wait until download pop-up is loaded (based on presence of "button" table):
-    download_button = wait_for_then_locate_element(driver, xpath="/html/body/div[15]/div/div[2]/div/div/div/div/div/div/div[2]/div/a")
+    download_button = wait_for_then_locate_element(driver,
+                                                   xpath="/html/body/div[17]/div/div[2]/div/div/div/div/div/div/div[2]/div/a")
     safe_click_element(driver, download_button)
 
     if verbose: print("Successfully downloaded price data from comdirect.")
@@ -179,9 +190,11 @@ def fetch_price_from_comdirect(raw_download_dir: Path,
     # fetch download:
     downloaded_frame = pd.read_csv(filemgmt.most_recent_file(raw_download_dir, ".csv", search_by='meta-data'),
                                    sep=";", encoding="latin-1")
+
     # format frame:
     formatted_frame = downloaded_frame.reset_index().iloc[1:, :]
-    formatted_frame.rename(columns={'level_0': 'date', 'level_1': 'time', 'level_3': 'price'}, inplace=True)
+    # close price is level_5:
+    formatted_frame.rename(columns={'level_0': 'date', 'level_1': 'time', 'level_5': 'price'}, inplace=True)
 
     # type conversion:
     formatted_frame['datetime'] = pd.to_datetime(
@@ -411,7 +424,11 @@ def scrape_portfolio_holdings_from_wikifolio(driver: webdriver.Chrome) -> tuple[
         isin = isin_entry.text
 
         price_entry = row.find_element(By.XPATH, "td[2]/span/div")
-        price = strconv.str_to_float(price_entry.text)
+        try:
+            price = strconv.str_to_float(price_entry.text)
+        except ValueError:
+            print(f"Error in price conversion for ISIN {isin}. Wikifolio seems to not display such.")
+            price = None
 
         shares_count_entry = row.find_element(By.XPATH, "td[3]/div")
         shares_count = strconv.str_to_float(shares_count_entry.text)
