@@ -88,14 +88,20 @@ def process_whatsapp_message(body, custom_response_function: callable = None):
     custom_response_function : callable, optional
         A custom function provided to generate a response based on the incoming message body. If not provided, a default response generation function is used.
     """
+    # irrelevant but placeholder:
     wa_id = body["entry"][0]["changes"][0]["value"]["contacts"][0]["wa_id"]
     name = body["entry"][0]["changes"][0]["value"]["contacts"][0]["profile"]["name"]
 
     message = body["entry"][0]["changes"][0]["value"]["messages"][0]
-    message_body = message["text"]["body"]
+    try:
+        message_body = message["text"]["body"]
+    except KeyError:  # if no text content
+        message_body = ""
 
     # either use provided custom response function or pre-defined generate_response() in this script
     response = generate_response(message_body) if custom_response_function is None else custom_response_function(message_body)
+    if response == "":  # empty response
+        return
 
     # OpenAI Integration
     # response = generate_response(message_body, wa_id, name)
