@@ -8,4 +8,6 @@ def str_to_float(input: str, is_ger_format=True) -> float:
     input = ''.join([char for char in input if not char.isalpha()])
 
     # convert to float and return:
-    return float(input.strip())
+    if input == '': return 0.0
+    else:
+        return float(input.strip())
