@@ -716,7 +716,9 @@ class KOCertificate:
                   data=price_array,
                   name='Future Price')
 
-    def update_product_details_from_scrape(self, scrape_driver_executable_path: str = "", use_as_2nd_base_price: bool = True):
+    def update_product_details_from_scrape(self, scrape_driver_executable_path: str = "",
+                                           use_as_2nd_base_price: bool = True,
+                                           update_issue_date: bool = False):
         """
         Updates product details by fetching updated information from an external source using a scraping
         driver. Specifically, it retrieves the risk premium, subscription ratio, current base price, and
@@ -734,8 +736,12 @@ class KOCertificate:
             Defaults to True.
 
         """
-        self.risk_premium, self.subscription_ratio, current_base_price, self.issue_date = webint.fetch_future_info_from_boerse_fra(self.isin,
+        self.risk_premium, self.subscription_ratio, current_base_price, issue_date = webint.fetch_future_info_from_boerse_fra(self.isin,
                                                                                                              scrape_driver_executable_path)
+
+        # sometimes the issue date is very shortly, to prevent calculation errors in irrelevant timespans
+        if update_issue_date: self.issue_date = issue_date
+
         if use_as_2nd_base_price:
             self.date_base_price_tuple2 = (datetime.today().strftime('%Y-%m-%d'), current_base_price)
         else:
