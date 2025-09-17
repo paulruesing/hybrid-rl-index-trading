@@ -1,9 +1,9 @@
 import time
 from functools import wraps
 from threading import Thread, Event
+from selenium.common.exceptions import WebDriverException
 
-
-def timed_callback_decorator(callback: callable = print, interval_minutes=1):
+def timed_callback_decorator(callback: callable = print, interval_minutes=10):
     """
     Function decorator that times the wrapped function and executes a callback periodically.
 
@@ -24,15 +24,26 @@ def timed_callback_decorator(callback: callable = print, interval_minutes=1):
             stop_event = Event()
 
             def report_status():
+                # Save the start time and initialize the last_callback_time
+                start_time = time.time()
+                last_callback_time = start_time
+
                 # Periodically calls the callback every `interval_minutes`
                 while not stop_event.is_set():
-                    time.sleep(interval_minutes * 60)  # Wait for the interval
-                    elapsed_time = time.time() - start_time
-                    if not stop_event.is_set():
-                        callback(f"Function `{func.__name__}` running for {elapsed_time / 60:.2f} minutes...")
+                    current_time = time.time()
+                    # Check if the interval has elapsed since the last callback
+                    if current_time >= last_callback_time + (interval_minutes * 60):
+                        elapsed_time = current_time - start_time
+
+                        # Invoke callback with a status message
+                        if not stop_event.is_set():
+                            callback(f"Function `{func.__name__}` running for {elapsed_time / 60:.2f} minutes...")
+
+                        # Update the last callback time
+                        last_callback_time = current_time
 
             # Start the thread that handles periodic callback execution
-            status_thread = Thread(target=report_status)
+            status_thread = Thread(target=report_status, daemon=True)
             status_thread.start()
 
             try:
@@ -49,7 +60,7 @@ def timed_callback_decorator(callback: callable = print, interval_minutes=1):
     return decorator
 
 
-def retry_decorator(exceptions=(ValueError, AttributeError, IndexError), on_error_callback: callable = print, retries: int = 3, delay: int = 1):
+def retry_decorator(exceptions=(ValueError, AttributeError, IndexError, WebDriverException, TypeError), on_error_callback: callable = print, retries: int = 3, delay: int = 1):
     """
     Creates a decorator to automatically retry a function upon encountering specified exceptions.
 
@@ -79,7 +90,7 @@ def retry_decorator(exceptions=(ValueError, AttributeError, IndexError), on_erro
                     return func(*args, **kwargs)
                 except exceptions as e:
                     attempts += 1
-                    error_message = f"Starting attempt {attempts} because of error: {str(e)}"
+                    error_message = f"Starting re-try {attempts}/{retries} because of error: {str(e)}"
                     if on_error_callback is not None: on_error_callback(error_message)
 
                     if attempts >= retries:
