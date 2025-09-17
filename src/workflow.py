@@ -4,12 +4,14 @@ from src.pipeline.rl_environments import RLTradingEnv, env_parametrisation_loop,
 from src.pipeline.rl_agents import MultiProductAgent
 from src.pipeline.financial_products import KOCertificate, KOCertificateSet
 from src.pipeline.chatbot import WhatsAppChatbot
+from src.utils.function_decorators import retry_decorator, timed_callback_decorator
 import src.pipeline.web_interaction as webinteraction
 import src.utils.file_management as filemgmt
 
 from datetime import datetime
 import time
 from typing import Union, Literal
+from itertools import combinations
 import numpy as np
 import pandas as pd
 import json
@@ -70,7 +72,7 @@ data_manager = StockPriceDataManager(ticker_symbol='DAX',
                                     )
 
 pred_manager = PredictorManager(data_manager=data_manager, initialisation_dir=SAVED_MODELS, recursive=True,
-                                not_older_than_n_days=12,  # only recently fine-tuned models
+                                not_older_than_n_days=7,  # only recently fine-tuned models
                                 )
 # todo: link pred_manager.describe_preset_types() to whatsapp
 
@@ -84,8 +86,10 @@ backtest_portfolio = KOCertificateSet.load_from_csv(
 
 env = RLTradingEnv(price_series=data_manager.env_interp_prices,
                    price_sampling_rate_minutes=data_manager.env_sampling_rate_minutes,
-                   predictor_instances=pred_manager.get_predictors_by_type_sorted(architecture='LSTM',
-                                                                                  return_instances=True, k_best=3),
+                   predictor_instances=pred_manager.get_predictors_by_type_sorted(architecture='LSTM', preset_type='c2', return_instances=True,
+                                                                                  k_best=1) + pred_manager.get_predictors_by_type_sorted(architecture='LSTM', preset_type='d2', return_instances=True,
+                                                                                                                                         k_best=1) + pred_manager.get_predictors_by_type_sorted(architecture='LSTM', preset_type='d3', return_instances=True,
+                                                                                                                                                                                                k_best=1),
                    product_set=portfolio,
                    trading_quantity_per_leverage_factor=2.5,
                    sell_opposite_direction_if_no_cash=True, sell_all_opposite_products_if_no_cash=True,
@@ -106,6 +110,13 @@ chatter = WhatsAppChatbot("../private/chatbot.env", verbose=True)
 
 ###################### DESCRIPTIVE FUNCTIONS ######################
 def describe_portfolio() -> str:
+    """
+    Provides a textual summary of the portfolio by describing the Knock-Out certificates within it.
+
+    Returns
+    -------
+    str
+        A formatted string summarizing the portfolio's Knock-Out certificates with the following details"""
     output = "*Current the portfolio includes the following certificates:*\n\n"
 
     isin_list = [f"ISIN: {product.isin}" for product in portfolio.ko_certificates]
@@ -123,6 +134,19 @@ def describe_portfolio() -> str:
 
 
 def describe_agent():
+    """
+    Provides a description of the agent's current policy configuration based on its type.
+
+    Returns
+    -------
+    str
+        A detailed textual description of the agent's policy configuration if the agent is of type 'MultiProductAgent'.
+        If the agent is not a 'MultiProductAgent', a message indicating that the agent is not manually defined and no details about the policy can be provided is returned.
+
+    Notes
+    -----
+    - The description includes the agent's potential thresholds and corresponding actions (e.g., hold, sell, buy) based on the `env.potential_horizon_days`.
+    - For 'MultiProductAgent', the behavior is described in terms of thresholds for"""
     output = "*Currently the agent is configured as follows:*\n\n"
 
     if not isinstance(agent, MultiProductAgent):
@@ -135,6 +159,16 @@ def describe_agent():
 
 
 def describe_open_positions():
+    """
+    Provides a description of currently open positions within the environment.
+
+    Iterates through the environment's open positions, if any exist, and formats them into a human-readable string. Includes details such as the financial instrument's ISIN, number of shares, leverage, price, direction, and percentage share of the portfolio. If no positions are open, the function returns a string indicating no open positions.
+
+    Returns
+    -------
+    str
+        A string describing the current open positions or indicating that none exist.
+    """
     output = "*Currently there are the following open positions:*\n\n"
 
     if len(env.open_positions) == 0:
@@ -144,44 +178,275 @@ def describe_open_positions():
             output += f"*{isin}*\nShares: {shares}\nLeverage: {leverage:.2f}x\nPrice: {price:.2f} €\nDirection: {direction}\nShare of Portfolio: {share_of_portfolio:.2f} %\n\n"
     return output
 
-def describe_predictors() -> str:
+def describe_env_predictors() -> str:
+    """
+    Provides a description of the current predictors in the environment.
+
+    Returns
+    -------
+    str
+        A string representation of the current predictors in the environment.
+    """
     return "*Currently the environment includes the following predictors:*\n\n" + str(env.predictor_instances)
 
 
 def describe_workflows() -> str:
+    """
+    Describe the currently scheduled workflows and their execution times.
+
+    This function iterates through a dictionary (`function_schedule`) that maps function names to their respective schedules. Each schedule contains execution time details in the order of Day, Weekday, Hour, and Minute. The function constructs a descriptive string providing the execution details for each workflow. It also converts numeric weekday values to their corresponding weekday names for better readability.
+
+    Returns
+    -------
+    str
+        A descriptive string listing all scheduled workflows along with their execution times, grouped by Day, Weekday, Hour, and Minute.
+    """
     output = "*Currently the following workflows are scheduled:*\n"
     for func, execution_time in function_schedule.items():
         output += f"\n*{func}* to be executed on\n"
         for entry, label in zip(execution_time, ["Day", "Weekday", "Hour", "Minute"]):
             if entry is None: continue
-            output += f"{label}: {entry}\n"
+            day_weekday_dict = {0: "Monday", 1: "Tuesday", 2: "Wednesday", 3: "Thursday", 4: "Friday", 5: "Saturday", 6: "Sunday"}
+
+            # allow for multiple entries:
+            if not isinstance(entry, list): entry = [entry]
+            output += f"{label}{'s' if len(entry) > 1 else ''}: "
+            for int_entry in entry:
+                if label == "Weekday": int_entry = day_weekday_dict[int_entry]
+                output += f"{int_entry}, "
+            # remove last comma and whitespace
+            output = output[:-2]
+            output += "\n"
+
     return output
 
 def describe_predictor_presets() -> str:
+    """
+    Describes the predictor presets available.
+
+    This function retrieves a description of the different preset types
+    available in the predictor manager. Presets typically define
+    pre-configured settings or strategies for the predictor,
+    allowing for streamlined initialization and usage.
+
+    Returns
+    -------
+    str
+        A string description of the available predictor presets.
+    """
     return pred_manager.describe_preset_types()
+
+def describe_best_predictors(presets_to_include: [str] = ("c1", "c2", "d1", "d2", "d3")) -> str:
+    """
+    Describes the best predictors based on the given preset types.
+
+    This function iterates over a list of preset predictor types and retrieves the best predictor for each type
+    based on its validation hit rate. It generates a formatted string summarizing the best available predictors
+    along with their validation hit rates.
+
+    Parameters
+    ----------
+    presets_to_include : list of str, optional
+        A list of preset predictor types to include in the description. The default values are
+        ["c1", "c2", "d1", "d2", "d3"].
+
+    Returns
+    -------
+    str
+        A formatted string listing the best predictors for the specified preset types along with their validation
+        hit rates.
+
+    Raises
+    ------
+    IndexError
+        If there are no predictors available for a specific preset type (handled internally and skipped
+        for that type).
+    """
+    output = "*Currently the best available predictors are:*\n\n"
+    for predictor_type in presets_to_include:
+        try:
+            best_val_hr = pred_manager.get_predictors_by_type_sorted(architecture='LSTM', return_instances=False,
+                                                       preset_type=predictor_type)[0]['validation_hit_rate']
+            output += f"*'{predictor_type}':* with validation hit rate *{best_val_hr*100:.2f} %*\n"
+        except IndexError:  # no predictor of that type included
+            continue
+
+    return output
+
+def describe_best_backtests(criterion: Literal['Mean', 'Median', 'SharpeRatio'] = 'Mean', k_best: int = 5,
+                            not_older_than: pd.Timestamp = None) -> str:
+    """
+    Parameters
+    ----------
+    criterion : {'Mean', 'Median', 'SharpeRatio'}, default 'Mean'
+        The metric to sort the backtests and determine the best configurations.
+
+    k_best : int, default 5
+        The number of top backtests to select based on the specified criterion.
+
+    not_older_than : pandas.Timestamp, optional
+        A date filter to include only backtests performed on or after the provided timestamp.
+
+    Returns
+    -------
+    str
+        A formatted string describing the top `k_best` backtests based on the specified criterion.
+    """
+    backtest_frame = pd.read_csv(filemgmt.most_recent_file(SAVED_BACKTESTS))
+
+    # select only recent
+    backtest_frame['date'] = pd.to_datetime(backtest_frame['date'])
+    if not_older_than is not None:
+        backtest_frame = backtest_frame.loc[backtest_frame['date'] >= not_older_than]
+
+    # select best:
+    best_tests = backtest_frame.sort_values(by=criterion, ascending=False).iloc[:k_best].reset_index()
+
+    output_str = f"Currently the {k_best} *best backtests* {f'since {not_older_than} ' if not_older_than is not None else ''}are:\n\n"
+    for ind, row in best_tests.iterrows():
+        output_str += f"*{ind + 1}. best configuration:*\n"
+
+        def if_present_describe(key: str) -> str:
+            if key in row.keys():
+                return f"- {key}: {row[key]}\n"
+            else:
+                return ""
+
+        for key in ['date', 'predictor_instances', 'abs_potential_threshold_steps',
+                    'trading_quantity_per_leverage_factor', 'leverage_categories',
+                    'sell_opposite_direction_if_no_cash', 'sell_all_opposite_products_if_no_cash']:
+            output_str += if_present_describe(key)
+        output_str += "\n"
+    return output_str
 
 
 ###################### WORKFLOW FUNCTIONS ######################
-# todo: SUNDAYS -> pred_manager.fine_tune_predictors() -> then reinitialise_pred_manager
-def fine_tune_predictors():
-    pass
+# SATURDAYS
+def fine_tune_predictors(patience_tuple: [int] = (10, 20), presets_to_include: [str] = ("c1", "c2", "d1", "d2", "d3")):
+    # reinitialise predictor manager with larger not_older_than_n_days
+    temp_pred_manager = PredictorManager(data_manager=data_manager, initialisation_dir=SAVED_MODELS, recursive=True,
+                                         not_older_than_n_days=60,  # models of last two month
+                                         )
+
+    chatter(f"I am going to *fine-tune the predictors* with presets {presets_to_include}. This may take a while.")
+    # fine tune best pred of defined types:
+    # todo: define custom_step_loss_weight_range based on best parametrisations
+    for ind, patience in enumerate(patience_tuple):  # two runs with lower and higher patience
+        chatter(f"Fine-tuning run {ind+1}/{len(patience_tuple)} with patience {patience}.")
+        temp_pred_manager.fine_tune_predictors(architectures_to_finetune=['LSTM'],
+                                               types_to_finetune=presets_to_include,
+                                               finetune_working_directory=WORKING_DIR_PREDICTORS,
+                                               train_epochs=200, early_stopping_patience=patience, )
+
+    # reinitialise predictor manager with small not_older_than_n_days
+    global pred_manager  # modify beyond function scope
+    pred_manager = PredictorManager(data_manager=data_manager, initialisation_dir=SAVED_MODELS, recursive=True,
+                                    not_older_than_n_days=10,
+                                    # models of last week (and some more days if fine-tuning was delayed)
+                                    )
+
+    chatter("Fine-tuning runs finished!")
+    chatter(describe_best_predictors(presets_to_include=presets_to_include))
 
 
 # todo: 1ST -> predictor_parametrisation_loop() -> print_results -> then reinitialise_pred_manager
+def parametrize_predictors():
+    pass
 
 
-# todo: 15TH -> env_parametrisation_loop() -> print_results -> then eventually amend env
+def back_test_predictors(presets_to_consider=("b1", "b2", "c1", "c2", "d1", "d2", "d3"),
+                         n_predictors_range: [int] = (1, 3),
+                         architectures_to_consider: [str] = ("LSTM",),):
+    """
+    Back-tests a range of predictor combinations based on the given preset types and architectures.
+
+    Parameters
+    ----------
+    presets_to_consider : tuple of str, default=("b1", "b2", "c1", "c2", "d1", "d2", "d3")
+        List of preset identifiers to consider for back-testing.
+
+    n_predictors_range : tuple of int, default=(1, 4)
+        Range specifying the minimum and maximum number of predictors to combine for testing.
+
+    architectures_to_consider : tuple of str, default=("LSTM",)
+        Neural network architectures to consider for building predictor combinations.
+    """
+    # resulting combinations:
+    combs_to_backtest = []
+    for number_of_presets in range(n_predictors_range[0], n_predictors_range[1] + 1):
+        for comb in combinations(presets_to_consider, r=number_of_presets):
+            combs_to_backtest.append(comb)
+
+    # derive corresponding predictor instances:
+    predictor_list = []
+    for arch in architectures_to_consider:
+        for comb in combs_to_backtest:
+            list_entry = []
+            for preset in comb:
+                try:
+                    list_entry.append(pred_manager.get_predictors_by_type_sorted(architecture=arch, preset_type=preset,
+                                                                                 return_instances=True, k_best=1)[0])
+                except IndexError:
+                    print(f"No {arch} predictor found for {preset} in {comb}. Skipping.")
+            if len(list_entry) > 0: predictor_list.append(list_entry)
+
+    # status message:
+    chatter(f"Will now backtest {len(predictor_list)} combinations of predictors, each taking approx. 10 minutes to complete, hence estimating a total of {len(predictor_list)*10/60:.2f} hours.")
+
+    print(predictor_list)
+    env_parametrisation_loop(
+            env_price_series=data_manager.env_interp_prices,
+            env_price_sampling_rate_minutes=data_manager.env_sampling_rate_minutes,
+            env_product_set=backtest_portfolio,
+            backtest_database_dir=SAVED_BACKTESTS,
+            # varying params:
+            predictor_instances=predictor_list,
+
+            # constant params:
+            # 90 day expected return, sell -> buy -> highest leverage
+            trading_quantity_per_leverage_factor=2.5,
+            abs_potential_threshold_steps=(.0025, .04, .1),
+            sell_opposite_direction_if_no_cash=True,
+            sell_all_opposite_products_if_no_cash=True,
+            include_open_leverage_category=False,
+            precalculate_predictor_observations=True,
+            leverage_categories=(1.0, 2.0, 3.0, 4.0, 5.0))
+
+    chatter("Back-testing finished!")
+    chatter(describe_best_backtests(not_older_than=pd.Timestamp.now() - pd.Timedelta(days=2)))
 
 
-def predict_and_trade(add_missing_isins: bool = False):
-    ### scrape and update price data
-    # update interpolated data with scraping:
-    data_manager.update(force_include_scraped=True)
-    env.price_series = data_manager.env_interp_prices
-    portfolio.update_all_price_series(data_manager.non_etf_env_interp_prices)
+def update_portfolio(issue_date_offset_days:int = 50) -> None:
+    """
+    Updates the portfolio with new issue dates from web and saves the adjusted portfolio to a CSV file.
 
+    Parameters
+    ----------
+    issue_date_offset_days : int, optional
+        Number of days subtracted from the current date to set as the issue date for the products.
+    """
+    global portfolio  # to use and later overwrite global var
+
+    chatter("Fetching updated product data from börse-frankfurt.")
+    for product in portfolio.ko_certificates:
+        product.update_product_details_from_scrape(use_as_2nd_base_price=False)  # update product details from boerse-fra
+        product.enforce_base_price_increase_per_annum(abs_increase_pa=.03)
+        product.issue_date = datetime.now() - pd.Timedelta(days=issue_date_offset_days)  # very short issue date
+
+    # save adjusted portfolio:
+    portfolio.save_to_csv(SAVED_PORTFOLIOS / filemgmt.file_title("Scraped Certificate Set", ".csv"))
+
+    # save to CSV
+    portfolio = KOCertificateSet.load_from_csv(
+        file_path=filemgmt.most_recent_file(SAVED_PORTFOLIOS, ".csv", ["Scraped"]),
+        underlying_price_series=data_manager.non_etf_env_interp_prices, )
+    chatter("Successfully updated portfolio.")
+
+
+def update_env_from_scrape(add_missing_isins: bool = False) -> tuple[float, float, dict[str, float], dict[str, float]]:
     # set env where one more step can be executed:
     env.current_step = env.total_steps - 2
+    #chatter(f"Environment now is at {env.current_step_timestamp} from {env.step_timestamp_list[-1]}")
 
     ### scrape and update portfolio data:
     driver = webinteraction.login_to_wikifolio(WIKIFOLIO_USER_KEY[0], WIKIFOLIO_USER_KEY[1])
@@ -212,6 +477,19 @@ def predict_and_trade(add_missing_isins: bool = False):
             missing_isins.append(product.isin)
     if add_missing_isins: webinteraction.add_products_to_wikifolio(driver, missing_isins)
 
+    return wf_cash, wf_value, wf_shares_p_isin, wf_price_p_isin
+
+
+def predict_and_trade(add_missing_isins: bool = False):
+    ### scrape and update price data
+    # update interpolated data with scraping:
+    data_manager.update(force_include_scraped=True)
+    env.price_series = data_manager.env_interp_prices
+    portfolio.update_all_price_series(data_manager.non_etf_env_interp_prices)
+
+    # scrape data from wikifolio
+    wf_cash, wf_value, wf_shares_p_isin, _ = update_env_from_scrape(add_missing_isins=add_missing_isins)
+
     # status message:
     chatter("Hey! I just fetched wikifolio's statistics and today's price data. Now inferring today's predictions.")
     chatter(f"Currently the environment is at {env.current_step_timestamp}.")
@@ -233,7 +511,7 @@ def predict_and_trade(add_missing_isins: bool = False):
 
     ### execute / tell how to execute action:
     # status messages:
-    chatter(f"Currently we have {wf_cash} EUR cash in the wikifolio ({wf_cash / wf_value * 100:.2f}%).")
+    chatter(f"Currently we have {wf_cash:.2f} EUR cash in the wikifolio ({wf_cash / wf_value * 100:.2f}%).")
     trade_str_list = []  # describe recommended trades:
     for trade_dict in trade_implementor.action_log.values():
         if trade_dict["completed"]: continue  # only uncompleted trade
@@ -242,25 +520,84 @@ def predict_and_trade(add_missing_isins: bool = False):
     chatter("The resulting recommended trades are:")  # send via chatbot
     for trade_str in trade_str_list:
         chatter(trade_str)
+        print(trade_str)
     chatter(f"Now the environment is at {env.current_step_timestamp}.")
 
 
-def test_at_12_min():
-    chatter(f"It is {datetime.now().hour}.12 and this is a test")
+def tell_time():
+    chatter(f"It is {datetime.now().hour}.{datetime.now().minute} and this is a test")
+
+
+def update_env_predictors(types_to_include=("c2", "d2", "d3")) -> None:
+    """
+    Updates the environment's predictors based on the specified types.
+
+    Parameters
+    ----------
+    types_to_include : tuple of str, optional
+        A tuple of predictor types to include (e.g., "c2", "d2", "d3"). Default is ("c2", "d2", "d3").
+    """
+    preds_to_include = [pred_manager.get_predictors_by_type_sorted(architecture='LSTM',
+                                                                   preset_type=p_type,
+                                                                   return_instances=True,
+                                                                   k_best=1)[0] for p_type in types_to_include]
+    env.predictor_instances = preds_to_include
 
 
 ###################### WORKFLOW DEFINITION ######################
 # day (of month), weekday, hour, minute
-function_schedule = {predict_and_trade: [None, None, 16, 00],
-                     fine_tune_predictors: [None, 7, 10, 0],
-                     test_at_12_min: [None, None, None, 12],
+function_schedule = {predict_and_trade: [None, [0, 1, 2, 3, 4], 16, 20],  # 20 minutes offset, because 15-min delayed prices and +5min to prevent errors
+                     update_portfolio: [None,[0, 1, 2, 3, 4], 15, 20],  # update portfolio details to prepare prediction
+                     fine_tune_predictors: [None, 5, 13, 0],
+                     back_test_predictors: [None, 6, 13, 0],
+                     parametrize_predictors: [15, None, 17, 0],
+                     tell_time: [None, None, [13, 15] , [15, 45]],
                      }
 
 
 ###################### PROCESS DEFINITIONS ######################
+# todo: optimally, the execution and scheduler are again distinct processes acting on shared memory
+# otherwise e.g. the chatbot cannot answer during execution
 def responsive_workflow_process(shared_input_str, shared_output_str, chatbot_input_event, response_ready_event):
-    was_executed = [False] * len(function_schedule.keys())  # bools to prevent multiple execution
+    """
+    This function is designed to run continuously in a loop and must be executed within a multiprocess/multithread environment.
+    The function handles scheduled execution of tasks based on a predefined schedule (`function_schedule`) and processes chatbot input requests in parallel.
+    A synchronized and efficient mechanism is implemented for inter-process communication, using shared memory and event triggers.
+    
+    Parameters
+    ----------
+    shared_input_str : multiprocessing.Array
+        Shared memory object for storing the input string from a chatbot interface.
+        It is expected to be a byte array that supports inter-process communication.
 
+    shared_output_str : multiprocessing.Array
+        Shared memory object for storing the output string that will be sent to the chatbot.
+        It is expected to be a byte array and will store the chatbot's response in a similarly encoded format.
+
+    chatbot_input_event : multiprocessing.Event
+        Event object used to signal when the chatbot input string is ready to be processed.
+
+    response_ready_event : multiprocessing.Event
+        Event object used to signal when the chatbot response has been generated 
+        and is ready to be accessed by the interfacing process.
+
+    Notes
+    -----
+    - Task scheduling allows execution based on day, weekday, hour, and minute, and prevents multiple executions at the same scheduled time.
+    - Input in `shared_input_str` undergoes mapping for specific requests, and if unrecognized, it responds with potential options.
+    - Proper byte encoding and padding mechanisms are used to ensure seamless shared memory operations.
+    """
+    # sanity check, consecutive minutes are not allowed in the schedule of one function (because that is the smallest
+    # time unit in which we check for multiple executions)
+    for func, schedule in function_schedule.items():
+        _, _ , _, minute = schedule
+        if isinstance(minute, list):
+            for entry in minute:
+                if entry + 1 in minute:
+                    raise ValueError(f"Consecutive minutes are not allowed! Please amend the schedule of {func.__name__}.")
+
+    was_executed = [False] * len(function_schedule.keys())  # bools to prevent multiple execution
+    
     while True:
         ##### at each iteration, check whether the connected chatbot process needs to read out information:
         if chatbot_input_event.is_set():
@@ -272,14 +609,28 @@ def responsive_workflow_process(shared_input_str, shared_output_str, chatbot_inp
                 "describe portfolio": describe_portfolio,
                 "describe agent": describe_agent,
                 "describe open positions": describe_open_positions,
-                "describe predictors": describe_predictors,
+                "describe environment predictors": describe_env_predictors,
                 "describe workflows": describe_workflows,
                 "describe predictor presets": describe_predictor_presets,
+                "describe best predictors": describe_best_predictors,
+                "describe best backtests": describe_best_backtests,
+                "do update environment": update_env_from_scrape,
+                "do update environment predictors": update_env_predictors,
+                "do step environment": predict_and_trade,
+                "do update portfolio": update_portfolio,
+                "do backtests": back_test_predictors,
             }
-            if input_str.lower() in request_map:
+            # commands:
+            if input_str.lower()[:2] == "do" and input_str.lower() in request_map:
+                _ = request_map[input_str.lower()]()
+                output = "Done!"
+            # descriptions:
+            elif input_str.lower() in request_map:
                 output = str(request_map[input_str.lower()]())
             elif "describe " + input_str.lower().strip() in request_map:
                 output = str(request_map["describe " + input_str.lower().strip()]())
+            elif input_str == "":
+                output = ""  # empty input -> empty response
             else:
                 output = "*Possible inputs are:*\n\n" + "\n".join(request_map.keys())
 
@@ -296,34 +647,68 @@ def responsive_workflow_process(shared_input_str, shared_output_str, chatbot_inp
         #### and check whether any scheduled function needs to be executed:
         now = datetime.now()
         for func_ind, (func, schedule) in enumerate(function_schedule.items()):
-            if was_executed[func_ind]: continue
             day, weekday, hour, minute = schedule
-            execute = True
 
+            execute = True
             # check schedule
-            if day is not None and now.day != day:
-                execute = False
-            if weekday is not None and now.weekday() != weekday:
-                execute = False
-            if hour is not None and now.hour != hour:
-                execute = False
-            if minute is not None and now.minute != minute:
-                execute = False
+            if day is not None:
+                if isinstance(day, list):
+                    if now.day not in day or was_executed[func_ind]:
+                        execute = False
+                elif now.day != day or was_executed[func_ind]:
+                    execute = False
+
+            if weekday is not None:
+                if isinstance(weekday, list):
+                    if now.weekday() not in weekday or was_executed[func_ind]:
+                        execute = False
+                elif now.weekday() != weekday or was_executed[func_ind]:
+                    execute = False
+
+            if hour is not None:
+                if isinstance(hour, list):
+                    if now.hour not in hour or was_executed[func_ind]:
+                        execute = False
+                elif now.hour != hour or was_executed[func_ind]:
+                    execute = False
+
+            if minute is not None:
+                if isinstance(minute, list):
+                    if now.minute not in minute or was_executed[func_ind]:
+                        execute = False
+                elif now.minute != minute or was_executed[func_ind]:
+                    execute = False
 
             # execute function
             if execute:
-                func(); was_executed[func_ind] = True
+                func()
+                was_executed[func_ind] = True
 
+            # reset was_executed for the next scheduled time
             reset = True
-            # if schedule is just missed, reset was_executed:
-            if day is not None and now.day - 1 != day:
-                reset = False
-            if weekday is not None and now.weekday() - 1 != weekday:
-                reset = False
-            if hour is not None and now.hour - 1 != hour:
-                reset = False
-            if minute is not None and now.minute - 1 != minute:
-                reset = False
+            # check only the smallest provided timescale, because that is enough reason to reset
+            if minute is not None:
+                if isinstance(minute, list) and now.minute - 1 not in minute:
+                    reset = False
+                elif not isinstance(minute, list) and now.minute - 1 != minute:
+                    reset = False
+            elif hour is not None:
+                if isinstance(hour, list) and now.hour - 1 not in hour:
+                    reset = False
+                elif not isinstance(hour, list) and now.hour - 1 != hour:
+                    reset = False
+            elif weekday is not None:
+                if isinstance(weekday, list) and now.weekday() - 1 not in weekday:
+                    reset = False
+                elif not isinstance(weekday, list) and now.weekday() - 1 != weekday:
+                    reset = False
+            elif day is not None:
+                if isinstance(day, list) and now.day - 1 not in day:
+                    reset = False
+                elif not isinstance(day, list) and now.day - 1 != day:
+                    reset = False
+
+            # conduct reset if we are in the next scheduled time:
             if reset: was_executed[func_ind] = False
 
 
