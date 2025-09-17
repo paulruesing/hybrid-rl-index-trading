@@ -418,11 +418,17 @@ class RLTradingEnv(gym.Env):
         # get current observation:
         obs = self.current_observation
 
+        # format reward:
+        if isinstance(reward, (np.float32, np.float64, np.ndarray)):
+            formatted_reward = reward.item()  # safely get a Python float
+        else: formatted_reward = reward
+        formatted_reward = round(formatted_reward, 2) if (formatted_reward is not np.nan) and (formatted_reward != 0) else 0,
+
         # todo: if tendencies included in observations, include such here
         # construct info dictionary:
         info = {'Step': self.current_step,
                 'Time': self.current_step_timestamp.strftime('%Y-%m-%d %H:%M:%S'),
-                'Reward': round(reward.item(), 2) if (reward is not np.nan) and (reward != 0) else 0,
+                'Reward': formatted_reward,
                 'Action': self.action_enum_dict[action],
                 f'Avg. Expected Potential / {self.potential_horizon_days}d': self.current_avg_scaled_predicted_potential,
                 'Cash': round(self.cash, 2).item() if isinstance(round(self.cash, 2), np.float64) else round(self.cash,
