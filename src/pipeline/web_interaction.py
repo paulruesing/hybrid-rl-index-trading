@@ -1,6 +1,7 @@
 import src.utils.str_conversion as strconv
 import src.utils.file_management as filemgmt
 
+from typing import Union
 import time
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -12,6 +13,39 @@ from selenium.common.exceptions import ElementClickInterceptedException
 
 from pathlib import Path
 import pandas as pd
+
+def get_driver_options(raw_download_dir: Union[Path, str] = None) -> webdriver.ChromeOptions:
+    """
+    Configures and returns ChromeDriver options, allowing customization for download directory, headless execution, and other browser settings.
+
+    Parameters
+    ----------
+    raw_download_dir : Union[Path, str], optional
+        Path to the directory where download files should be saved. If specified, the browser will save files to this directory without prompting the user. If None, default browser behavior is applied.
+
+    Returns
+    -------
+    webdriver.ChromeOptions
+        Configured ChromeDriver options object.
+    """
+    chrome_options = webdriver.ChromeOptions()
+
+    if raw_download_dir is not None:  # set download dir of driver instance
+        prefs = {"download.default_directory": str(raw_download_dir),
+                 "download.prompt_for_download": False,
+                 "download.directory_upgrade": True,
+                 "safebrowsing.enabled": True}
+        chrome_options.add_experimental_option("prefs", prefs)
+
+    # enable background run:
+    #chrome_options.add_argument("--headless")  # Enables headless mode
+    #chrome_options.add_argument("--disable-gpu")  # Disables GPU rendering (useful for older versions Windows)
+    # currently leads to issues!
+
+    chrome_options.add_argument("--window-size=1920x1080")  # Sets window size to avoid rendering issues
+
+    return chrome_options
+
 
 def fetch_future_info_from_boerse_fra(isin: str, driver_executable_path: str):
     """
@@ -63,7 +97,7 @@ def fetch_future_info_from_boerse_fra(isin: str, driver_executable_path: str):
 
     # initialise driver and open url:
     service = Service(executable_path=driver_executable_path)
-    driver = webdriver.Chrome(service=service)  # opens window, do not close!
+    driver = webdriver.Chrome(service=service, options=get_driver_options())  # opens window, do not close!
     driver.get(url)
 
     # Set zoom to 50% (zoom out) to prevent display size issues
@@ -145,16 +179,8 @@ def fetch_price_from_comdirect(raw_download_dir: Path,
     ValueError
         If the downloaded CSV file does not contain valid data for processing.
     """
-    # download directory
-    chrome_options = webdriver.ChromeOptions()
-    prefs = {"download.default_directory": str(raw_download_dir),
-             "download.prompt_for_download": False,
-             "download.directory_upgrade": True,
-             "safebrowsing.enabled": True}
-    chrome_options.add_experimental_option("prefs", prefs)
-
     service = Service(executable_path=driver_executable_path)
-    driver = webdriver.Chrome(service=service, options=chrome_options)  # opens window, do not close!
+    driver = webdriver.Chrome(service=service, options=get_driver_options(raw_download_dir))  # opens window, do not close!
     driver.get(url)
 
     # Set zoom to 50% (zoom out) to prevent display size issues
@@ -172,18 +198,17 @@ def fetch_price_from_comdirect(raw_download_dir: Path,
     safe_click_element(driver, quote_button)
 
     # amend time resolution of quotes:
-    interval_dropdown_element = wait_for_then_locate_element(driver,
-                                                             "/html/body/div[17]/div/div[2]/div/div/div/div/div/div/form/div[2]/div/div[2]/div[2]/div/div/select")
+    interval_dropdown_element = wait_for_then_locate_element(driver, xpath="""//*[@id="FORM_KURSDATEN"]/div[2]/div/div[2]/div[2]/div/div/select""")
     interval_dropdown = Select(interval_dropdown_element)
     interval_dropdown.select_by_visible_text("15 Minuten")
-    update_button = wait_for_then_locate_element(driver,
-                                                 "/html/body/div[17]/div/div[2]/div/div/div/div/div/div/form/div[3]/div/button")
-    safe_click_element(driver, update_button)
 
+    update_button = wait_for_then_locate_element(driver, """//*[@id="FORM_KURSDATEN"]/div[3]/div/button""")
+    safe_click_element(driver, update_button)
+    time.sleep(2)
     # wait until download pop-up is loaded (based on presence of "button" table):
-    download_button = wait_for_then_locate_element(driver,
-                                                   xpath="/html/body/div[17]/div/div[2]/div/div/div/div/div/div/div[2]/div/a")
+    download_button = wait_for_then_locate_element(driver, xpath="""//*[@id="id_pricedata-layer_trigger-aria-description-wrapper"]/div[2]/div/div/div/div/div/div/div[2]/div/a""")
     safe_click_element(driver, download_button)
+    time.sleep(10)  # wait until download is done
 
     if verbose: print("Successfully downloaded price data from comdirect.")
 
@@ -309,7 +334,7 @@ def login_to_wikifolio(username: str, password: str, wikifolio_id: str = "wfprtr
     url = f"https://www.wikifolio.com/de/de/meine-wikifolios/trade/{wikifolio_id.lower()}"
 
     service = Service(executable_path=driver_executable_path)
-    driver = webdriver.Chrome(service=service)  # opens window, do not close!
+    driver = webdriver.Chrome(service=service, options=get_driver_options())  # opens window, do not close!
     driver.get(url)
 
     # Set zoom to 50% (zoom out) to prevent display size issues
