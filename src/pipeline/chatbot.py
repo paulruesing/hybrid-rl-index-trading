@@ -147,7 +147,8 @@ class WhatsAppChatbot:
     def test_connection(self):
         """
         Tests the connection to the Facebook Graph API for sending WhatsApp messages. Try this, if the API
-        returns a successful status code but doesn't actually send the message.
+        returns a successful status code but doesn't actually send the message. The receiver needs to reply once to
+        verify the connection.
 
         Sends a test message using the "hello_world" template to verify connectivity
         and proper authorization credentials.
