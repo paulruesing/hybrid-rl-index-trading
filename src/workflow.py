@@ -23,6 +23,7 @@ from typing import Union
 from pathlib import Path
 from ctypes import c_char
 import multiprocessing
+import threading
 
 from src.utils.chatbot_app import create_app
 
@@ -74,7 +75,6 @@ data_manager = StockPriceDataManager(ticker_symbol='DAX',
 pred_manager = PredictorManager(data_manager=data_manager, initialisation_dir=SAVED_MODELS, recursive=True,
                                 not_older_than_n_days=7,  # only recently fine-tuned models
                                 )
-# todo: link pred_manager.describe_preset_types() to whatsapp
 
 portfolio = KOCertificateSet.load_from_csv(
     file_path=filemgmt.most_recent_file(SAVED_PORTFOLIOS, ".csv", ["Scraped"]),
@@ -116,7 +116,8 @@ def describe_portfolio() -> str:
     Returns
     -------
     str
-        A formatted string summarizing the portfolio's Knock-Out certificates with the following details"""
+        A formatted string summarizing the portfolio's Knock-Out certificates with the following details
+    """
     output = "*Current the portfolio includes the following certificates:*\n\n"
 
     isin_list = [f"ISIN: {product.isin}" for product in portfolio.ko_certificates]
@@ -178,6 +179,7 @@ def describe_open_positions():
             output += f"*{isin}*\nShares: {shares}\nLeverage: {leverage:.2f}x\nPrice: {price:.2f} €\nDirection: {direction}\nShare of Portfolio: {share_of_portfolio:.2f} %\n\n"
     return output
 
+
 def describe_env_predictors() -> str:
     """
     Provides a description of the current predictors in the environment.
@@ -220,6 +222,7 @@ def describe_workflows() -> str:
 
     return output
 
+
 def describe_predictor_presets() -> str:
     """
     Describes the predictor presets available.
@@ -235,6 +238,7 @@ def describe_predictor_presets() -> str:
         A string description of the available predictor presets.
     """
     return pred_manager.describe_preset_types()
+
 
 def describe_best_predictors(presets_to_include: [str] = ("c1", "c2", "d1", "d2", "d3")) -> str:
     """
@@ -272,6 +276,7 @@ def describe_best_predictors(presets_to_include: [str] = ("c1", "c2", "d1", "d2"
             continue
 
     return output
+
 
 def describe_best_backtests(criterion: Literal['Mean', 'Median', 'SharpeRatio'] = 'Mean', k_best: int = 5,
                             not_older_than: pd.Timestamp = None) -> str:
@@ -312,7 +317,7 @@ def describe_best_backtests(criterion: Literal['Mean', 'Median', 'SharpeRatio'] 
             else:
                 return ""
 
-        for key in ['date', 'predictor_instances', 'abs_potential_threshold_steps',
+        for key in ['date', 'Mean', 'StdDev', 'SharpeRatio', 'predictor_instances', 'abs_potential_threshold_steps',
                     'trading_quantity_per_leverage_factor', 'leverage_categories',
                     'sell_opposite_direction_if_no_cash', 'sell_all_opposite_products_if_no_cash']:
             output_str += if_present_describe(key)
@@ -322,6 +327,8 @@ def describe_best_backtests(criterion: Literal['Mean', 'Median', 'SharpeRatio'] 
 
 ###################### WORKFLOW FUNCTIONS ######################
 # SATURDAYS
+@timed_callback_decorator(callback=chatter)
+@retry_decorator(on_error_callback=chatter)
 def fine_tune_predictors(patience_tuple: [int] = (10, 20), presets_to_include: [str] = ("c1", "c2", "d1", "d2", "d3")):
     # reinitialise predictor manager with larger not_older_than_n_days
     temp_pred_manager = PredictorManager(data_manager=data_manager, initialisation_dir=SAVED_MODELS, recursive=True,
@@ -350,10 +357,13 @@ def fine_tune_predictors(patience_tuple: [int] = (10, 20), presets_to_include: [
 
 
 # todo: 1ST -> predictor_parametrisation_loop() -> print_results -> then reinitialise_pred_manager
+@timed_callback_decorator(callback=chatter)
+@retry_decorator(on_error_callback=chatter)
 def parametrize_predictors():
     pass
 
-
+@timed_callback_decorator(callback=chatter)
+@retry_decorator(on_error_callback=chatter)
 def back_test_predictors(presets_to_consider=("b1", "b2", "c1", "c2", "d1", "d2", "d3"),
                          n_predictors_range: [int] = (1, 3),
                          architectures_to_consider: [str] = ("LSTM",),):
@@ -415,7 +425,8 @@ def back_test_predictors(presets_to_consider=("b1", "b2", "c1", "c2", "d1", "d2"
     chatter("Back-testing finished!")
     chatter(describe_best_backtests(not_older_than=pd.Timestamp.now() - pd.Timedelta(days=2)))
 
-
+@timed_callback_decorator(callback=chatter)
+@retry_decorator(on_error_callback=chatter)
 def update_portfolio(issue_date_offset_days:int = 50) -> None:
     """
     Updates the portfolio with new issue dates from web and saves the adjusted portfolio to a CSV file.
@@ -427,7 +438,7 @@ def update_portfolio(issue_date_offset_days:int = 50) -> None:
     """
     global portfolio  # to use and later overwrite global var
 
-    chatter("Fetching updated product data from börse-frankfurt.")
+    chatter("Fetching updated product data from boerse-frankfurt.")
     for product in portfolio.ko_certificates:
         product.update_product_details_from_scrape(use_as_2nd_base_price=False)  # update product details from boerse-fra
         product.enforce_base_price_increase_per_annum(abs_increase_pa=.03)
@@ -442,7 +453,8 @@ def update_portfolio(issue_date_offset_days:int = 50) -> None:
         underlying_price_series=data_manager.non_etf_env_interp_prices, )
     chatter("Successfully updated portfolio.")
 
-
+@timed_callback_decorator(callback=chatter)
+@retry_decorator(on_error_callback=chatter)
 def update_env_from_scrape(add_missing_isins: bool = False) -> tuple[float, float, dict[str, float], dict[str, float]]:
     # set env where one more step can be executed:
     env.current_step = env.total_steps - 2
@@ -480,6 +492,8 @@ def update_env_from_scrape(add_missing_isins: bool = False) -> tuple[float, floa
     return wf_cash, wf_value, wf_shares_p_isin, wf_price_p_isin
 
 
+@timed_callback_decorator(callback=chatter)
+@retry_decorator(on_error_callback=chatter)
 def predict_and_trade(add_missing_isins: bool = False):
     ### scrape and update price data
     # update interpolated data with scraping:
@@ -556,8 +570,6 @@ function_schedule = {predict_and_trade: [None, [0, 1, 2, 3, 4], 16, 20],  # 20 m
 
 
 ###################### PROCESS DEFINITIONS ######################
-# todo: optimally, the execution and scheduler are again distinct processes acting on shared memory
-# otherwise e.g. the chatbot cannot answer during execution
 def responsive_workflow_process(shared_input_str, shared_output_str, chatbot_input_event, response_ready_event):
     """
     This function is designed to run continuously in a loop and must be executed within a multiprocess/multithread environment.
@@ -587,17 +599,97 @@ def responsive_workflow_process(shared_input_str, shared_output_str, chatbot_inp
     - Input in `shared_input_str` undergoes mapping for specific requests, and if unrecognized, it responds with potential options.
     - Proper byte encoding and padding mechanisms are used to ensure seamless shared memory operations.
     """
-    # sanity check, consecutive minutes are not allowed in the schedule of one function (because that is the smallest
-    # time unit in which we check for multiple executions)
-    for func, schedule in function_schedule.items():
-        _, _ , _, minute = schedule
-        if isinstance(minute, list):
-            for entry in minute:
-                if entry + 1 in minute:
-                    raise ValueError(f"Consecutive minutes are not allowed! Please amend the schedule of {func.__name__}.")
+    ############# SCHEDULER THREAD ##############
+    def execute_scheduled_functions():
+        """
+        Separate function definition to run the scheduler in another thread.
+        """
+        # sanity check, consecutive minutes are not allowed in the schedule of one function (because that is the smallest
+        # time unit in which we check for multiple executions)
+        for func, schedule in function_schedule.items():
+            _, _ , _, minute = schedule
+            if isinstance(minute, list):
+                for entry in minute:
+                    if entry + 1 in minute:
+                        raise ValueError(f"Consecutive minutes are not allowed! Please amend the schedule of {func.__name__}.")
 
-    was_executed = [False] * len(function_schedule.keys())  # bools to prevent multiple execution
-    
+        was_executed = [False] * len(function_schedule.keys())  # bools to prevent multiple execution
+
+        # run schedule checker
+        while True:
+            now = datetime.now()
+            for func_ind, (func, schedule) in enumerate(function_schedule.items()):
+                day, weekday, hour, minute = schedule
+
+                execute = True
+                # check schedule
+                if day is not None:
+                    if isinstance(day, list):
+                        if now.day not in day or was_executed[func_ind]:
+                            execute = False
+                    elif now.day != day or was_executed[func_ind]:
+                        execute = False
+
+                if weekday is not None:
+                    if isinstance(weekday, list):
+                        if now.weekday() not in weekday or was_executed[func_ind]:
+                            execute = False
+                    elif now.weekday() != weekday or was_executed[func_ind]:
+                        execute = False
+
+                if hour is not None:
+                    if isinstance(hour, list):
+                        if now.hour not in hour or was_executed[func_ind]:
+                            execute = False
+                    elif now.hour != hour or was_executed[func_ind]:
+                        execute = False
+
+                if minute is not None:
+                    if isinstance(minute, list):
+                        if now.minute not in minute or was_executed[func_ind]:
+                            execute = False
+                    elif now.minute != minute or was_executed[func_ind]:
+                        execute = False
+
+                # execute function
+                if execute:
+                    func()
+                    was_executed[func_ind] = True
+
+                # reset was_executed for the next scheduled time
+                reset = True
+                # check only the smallest provided timescale, because that is enough reason to reset
+                if minute is not None:
+                    if isinstance(minute, list) and now.minute - 1 not in minute:
+                        reset = False
+                    elif not isinstance(minute, list) and now.minute - 1 != minute:
+                        reset = False
+                elif hour is not None:
+                    if isinstance(hour, list) and now.hour - 1 not in hour:
+                        reset = False
+                    elif not isinstance(hour, list) and now.hour - 1 != hour:
+                        reset = False
+                elif weekday is not None:
+                    if isinstance(weekday, list) and now.weekday() - 1 not in weekday:
+                        reset = False
+                    elif not isinstance(weekday, list) and now.weekday() - 1 != weekday:
+                        reset = False
+                elif day is not None:
+                    if isinstance(day, list) and now.day - 1 not in day:
+                        reset = False
+                    elif not isinstance(day, list) and now.day - 1 != day:
+                        reset = False
+
+                # conduct reset if we are in the next scheduled time:
+                if reset: was_executed[func_ind] = False
+        #### end of scheduler function definition
+
+    # run scheduler in another thread:
+    schedule_thread = threading.Thread(target=execute_scheduled_functions,
+                                       daemon=True)  # daemon leads to termination of thread if main process terminates
+    schedule_thread.start()
+
+    ############# CHATBOT THREAD ##############
     while True:
         ##### at each iteration, check whether the connected chatbot process needs to read out information:
         if chatbot_input_event.is_set():
@@ -618,7 +710,6 @@ def responsive_workflow_process(shared_input_str, shared_output_str, chatbot_inp
                 "do update environment predictors": update_env_predictors,
                 "do step environment": predict_and_trade,
                 "do update portfolio": update_portfolio,
-                "do backtests": back_test_predictors,
             }
             # commands:
             if input_str.lower()[:2] == "do" and input_str.lower() in request_map:
@@ -643,73 +734,6 @@ def responsive_workflow_process(shared_input_str, shared_output_str, chatbot_inp
             response_ready_event.set()
             chatbot_input_event.clear()  # clear input event
             shared_input_str.value = b"\x00" * max_length  # clear output str
-
-        #### and check whether any scheduled function needs to be executed:
-        now = datetime.now()
-        for func_ind, (func, schedule) in enumerate(function_schedule.items()):
-            day, weekday, hour, minute = schedule
-
-            execute = True
-            # check schedule
-            if day is not None:
-                if isinstance(day, list):
-                    if now.day not in day or was_executed[func_ind]:
-                        execute = False
-                elif now.day != day or was_executed[func_ind]:
-                    execute = False
-
-            if weekday is not None:
-                if isinstance(weekday, list):
-                    if now.weekday() not in weekday or was_executed[func_ind]:
-                        execute = False
-                elif now.weekday() != weekday or was_executed[func_ind]:
-                    execute = False
-
-            if hour is not None:
-                if isinstance(hour, list):
-                    if now.hour not in hour or was_executed[func_ind]:
-                        execute = False
-                elif now.hour != hour or was_executed[func_ind]:
-                    execute = False
-
-            if minute is not None:
-                if isinstance(minute, list):
-                    if now.minute not in minute or was_executed[func_ind]:
-                        execute = False
-                elif now.minute != minute or was_executed[func_ind]:
-                    execute = False
-
-            # execute function
-            if execute:
-                func()
-                was_executed[func_ind] = True
-
-            # reset was_executed for the next scheduled time
-            reset = True
-            # check only the smallest provided timescale, because that is enough reason to reset
-            if minute is not None:
-                if isinstance(minute, list) and now.minute - 1 not in minute:
-                    reset = False
-                elif not isinstance(minute, list) and now.minute - 1 != minute:
-                    reset = False
-            elif hour is not None:
-                if isinstance(hour, list) and now.hour - 1 not in hour:
-                    reset = False
-                elif not isinstance(hour, list) and now.hour - 1 != hour:
-                    reset = False
-            elif weekday is not None:
-                if isinstance(weekday, list) and now.weekday() - 1 not in weekday:
-                    reset = False
-                elif not isinstance(weekday, list) and now.weekday() - 1 != weekday:
-                    reset = False
-            elif day is not None:
-                if isinstance(day, list) and now.day - 1 not in day:
-                    reset = False
-                elif not isinstance(day, list) and now.day - 1 != day:
-                    reset = False
-
-            # conduct reset if we are in the next scheduled time:
-            if reset: was_executed[func_ind] = False
 
 
 def responsive_chatbot_process(shared_input_str, shared_output_str, chatbot_input_event, response_ready_event):
