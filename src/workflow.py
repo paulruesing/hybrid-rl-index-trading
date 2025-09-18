@@ -45,6 +45,7 @@ SAVED_PORTFOLIOS = DATA / "portfolios"
 SAVED_BACKTESTS = DATA / "backtests"
 
 TRAINING_LOGS = ROOT / "output" / "rl_training_logs"
+PREDICTION_PLOTS = ROOT / "output" / "prediction_plots"
 
 PRIVATE_FILES = ROOT / "private"
 AV_API_KEY_FILE = PRIVATE_FILES / "Alpha Vantage API Key.txt"
@@ -497,7 +498,7 @@ def update_env_from_scrape(add_missing_isins: bool = False) -> tuple[float, floa
 def predict_and_trade(add_missing_isins: bool = False):
     ### scrape and update price data
     # update interpolated data with scraping:
-    data_manager.update(force_include_scraped=True)
+    #data_manager.update(force_include_scraped=True)
     env.price_series = data_manager.env_interp_prices
     portfolio.update_all_price_series(data_manager.non_etf_env_interp_prices)
 
@@ -510,6 +511,7 @@ def predict_and_trade(add_missing_isins: bool = False):
 
     ### infer new action:
     action, _ = agent.predict(env.current_observation)  # predict action
+    env.plot_current_predictions(save_fig_directory=PREDICTION_PLOTS, hidden=False)  # save prediction plot
     trade_implementor = TradeImplementor()  # log class
     new_obs, _, done, truncated, info = env.step(action, track_portfolio_exposure=False,
                                                  start_new_episode_if_finished=False,
@@ -521,7 +523,8 @@ def predict_and_trade(add_missing_isins: bool = False):
                             zip(env.current_potential_estimates, env.observation_horizons_minutes)]
     prediction_str = "\n".join(predictions_str_list)  # will be included in next str:
     explanatory_string = f"Based on the *predictions*\n\n{prediction_str}\n\n-> an *average predicted potential of {env.current_avg_scaled_predicted_potential * 100:.2f} %* in {env.potential_horizon_days} days, the agent wants to *{info['Action']}*!"
-    chatter(explanatory_string)
+    chatter.send_message(message=explanatory_string,  # include prediction plot
+                         image_path=filemgmt.most_recent_file(PREDICTION_PLOTS, ".png", "Prediction Visualisation"))
 
     ### execute / tell how to execute action:
     # status messages:
@@ -690,6 +693,8 @@ def responsive_workflow_process(shared_input_str, shared_output_str, chatbot_inp
     schedule_thread.start()
 
     ############# CHATBOT THREAD ##############
+    global last_chatbot_input
+    last_chatbot_input = ""
     while True:
         ##### at each iteration, check whether the connected chatbot process needs to read out information:
         if chatbot_input_event.is_set():
@@ -712,7 +717,9 @@ def responsive_workflow_process(shared_input_str, shared_output_str, chatbot_inp
                 "do update portfolio": update_portfolio,
             }
             # commands:
-            if input_str.lower()[:2] == "do" and input_str.lower() in request_map:
+            if input_str == last_chatbot_input:
+                output = "You wrote the same query as last time. Please write something different first. This helps to prevent redundant executions."
+            elif input_str.lower()[:2] == "do" and input_str.lower() in request_map:
                 _ = request_map[input_str.lower()]()
                 output = "Done!"
             # descriptions:
@@ -724,6 +731,9 @@ def responsive_workflow_process(shared_input_str, shared_output_str, chatbot_inp
                 output = ""  # empty input -> empty response
             else:
                 output = "*Possible inputs are:*\n\n" + "\n".join(request_map.keys())
+
+            # reset last input
+            last_chatbot_input = input_str
 
             # write in shared memory (properly encoded to bytes)
             max_length = len(shared_output_str)  # Determine the maximum length
