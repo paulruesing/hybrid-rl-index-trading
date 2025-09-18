@@ -498,7 +498,7 @@ def update_env_from_scrape(add_missing_isins: bool = False) -> tuple[float, floa
 def predict_and_trade(add_missing_isins: bool = False):
     ### scrape and update price data
     # update interpolated data with scraping:
-    #data_manager.update(force_include_scraped=True)
+    data_manager.update(force_include_scraped=True)
     env.price_series = data_manager.env_interp_prices
     portfolio.update_all_price_series(data_manager.non_etf_env_interp_prices)
 
