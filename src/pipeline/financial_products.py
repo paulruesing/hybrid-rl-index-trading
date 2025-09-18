@@ -498,7 +498,25 @@ class KOCertificate:
                     is_one_month = False
                     is_earlier = True
                 except KeyError:  # if 1 year is too large look 1 month
-                    end = self.base_price_series[self.date_base_price_tuple[0] - pd.Timedelta('28d')]
+                    end_date = self.date_base_price_tuple[0] - pd.Timedelta('28d')
+
+                    # if end_date still not in base price index:
+                    if end_date not in self.base_price_series.index:
+                        # Find the closest index manually
+                        index_array = self.base_price_series.index
+                        pos = index_array.searchsorted(end_date, side="left")
+                        if pos == 0:
+                            end_date = index_array[0]  # Closest is the first item
+                        elif pos == len(index_array):
+                            end_date = index_array[-1]  # Closest is the last item
+                        else:
+                            # Determine whether the left or right neighbor is closer
+                            before = index_array[pos - 1]
+                            after = index_array[pos]
+                            end_date = before if (end_date - before) <= (after - end_date) else after
+
+                    end = self.base_price_series[end_date]
+
                     is_one_month = True
                     is_earlier = True
 
