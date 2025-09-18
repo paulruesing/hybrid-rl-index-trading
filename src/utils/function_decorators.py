@@ -60,7 +60,9 @@ def timed_callback_decorator(callback: callable = print, interval_minutes=10):
     return decorator
 
 
-def retry_decorator(exceptions=(ValueError, AttributeError, IndexError, WebDriverException, TypeError), on_error_callback: callable = print, retries: int = 3, delay: int = 1):
+def retry_decorator(exceptions=(ValueError, AttributeError, IndexError, WebDriverException, TypeError),
+                    on_error_callback: callable = print,
+                    retries: int = 1, delay: int = 1):
     """
     Creates a decorator to automatically retry a function upon encountering specified exceptions.
 
@@ -91,7 +93,7 @@ def retry_decorator(exceptions=(ValueError, AttributeError, IndexError, WebDrive
                 except exceptions as e:
                     attempts += 1
                     error_message = f"Starting re-try {attempts}/{retries} because of error: {str(e)}"
-                    if on_error_callback is not None: on_error_callback(error_message)
+                    on_error_callback(error_message)
 
                     if attempts >= retries:
                         raise  # Re-raise the exception after max retries
