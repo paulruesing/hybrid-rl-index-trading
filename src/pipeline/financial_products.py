@@ -359,6 +359,21 @@ class KOCertificate:
                 is_earlier = True
             except KeyError:
                 new_date = given_date - pd.Timedelta('28d')
+
+                if new_date not in self.underlying_price_series.index:
+                    # Find the closest index manually
+                    index_array = self.underlying_price_series.index
+                    pos = index_array.searchsorted(new_date, side="left")
+                    if pos == 0:
+                        new_date = index_array[0]  # Closest is the first item
+                    elif pos == len(index_array):
+                        new_date = index_array[-1]  # Closest is the last item
+                    else:
+                        # Determine whether the left or right neighbor is closer
+                        before = index_array[pos - 1]
+                        after = index_array[pos]
+                        new_date = before if (new_date - before) <= (after - new_date) else after
+
                 _ = self.underlying_price_series[new_date]
                 is_one_month = True  # smaller timedelta (half year) leads to smaller base price change in below formula:
                 is_earlier = True
