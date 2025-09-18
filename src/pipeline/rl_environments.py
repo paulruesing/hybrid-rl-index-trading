@@ -819,7 +819,7 @@ class RLTradingEnv(gym.Env):
         """ Current average predicted potential for next potential_horizon_days (part of current_observation). """
         potential_list = np.array([])
         for horizon_minutes, potential in zip(self.observation_horizons_minutes, self.current_potential_estimates):
-            # todo: think whether this 24 needs to 14 (business day duration) because observation_horizons_minutes uses such indirectly
+            # todo: think how to change this 24 to 14 (business day duration) because observation_horizons_minutes uses such indirectly
             potential = potential / horizon_minutes * self.potential_horizon_days * 24 * 60  # scale per minute and then to per self.potential_horizon_days days
 
             potential_list = np.append(potential_list, [potential])
@@ -907,18 +907,63 @@ class RLTradingEnv(gym.Env):
         return predictor_types + other
 
     def compute_predicted_potentials(self, custom_timestamp: pd.Timestamp = None) -> np.ndarray:
-        """ Computes predicted potentials for all predictors for custom_timestamp (if provided) or current time. """
+        """
+        Computes predicted relative potentials for each predictor. Leverages self.compute_predicted_prices().
+
+        Parameters
+        ----------
+        custom_timestamp : pd.Timestamp, optional
+            A specific timestamp to compute predicted potentials for. If not provided, default behavior will be used.
+
+        Returns
+        -------
+        np.ndarray
+            An array of predicted potential values, representing the relative expected change at the end of the forecast horizon.
+        """
         potential_array = np.array([])
+        for _, (pred_input, prices) in self.compute_predicted_prices(custom_timestamp=custom_timestamp).items():
+            potential = (prices.iloc[-1] / pred_input.iloc[
+                -1] - 1).item()  # relative expected change at end of forecast horizon
+            potential_array = np.append(potential_array, [potential])
+        return potential_array
+
+    def compute_predicted_prices(self, custom_timestamp: pd.Timestamp = None) -> dict:
+        """
+        Compute predicted prices for each predictor instance.
+
+        This method iterates over all predictor instances associated with the object
+        and computes predicted prices based on their specific prediction logic. The
+        predicted prices are returned as a dictionary where the keys are the names
+        of the predictors and the values are tuples containing the predictor inputs,
+        a pandas Series of predicted prices, and corresponding timestamp indices.
+
+        In case certain conditions, such as a too-low step for rolling window calculations,
+        are not met, the corresponding predictors are skipped.
+
+        Parameters
+        ----------
+        custom_timestamp : pd.Timestamp, optional
+            A custom timestamp to override the default timestamp used for computing
+            predictor inputs. If not provided, defaults to None.
+
+        Returns
+        -------
+        dict
+            A dictionary mapping predictor names to tuples containing:
+            1. Predictor input.
+            2. A pandas Series with the predicted prices as data and respective dates as the index.
+        """
+        pred_feature_target_dict = {}
         for predictor in self.predictor_instances:
             try:
                 predictor_input = self.get_predictor_input(predictor, custom_timestamp=custom_timestamp)
             except ValueError:
                 continue  # happens if step is too low for rolling window
-            prices, _ = predictor.predict(predictor_input)
-            potential = (prices[-1] / predictor_input.iloc[
-                -1] - 1).item()  # relative expected change at end of forecast horizon
-            potential_array = np.append(potential_array, [potential])
-        return potential_array
+
+            prices, dates = predictor.predict(predictor_input, dtype='numpy')
+            pred_feature_target_dict[predictor.name] = (predictor_input,
+                                                        pd.Series(data=prices, index=dates))
+        return pred_feature_target_dict
 
     @property
     def potential_estimates_dict(self) -> {str: np.ndarray}:
@@ -1291,6 +1336,99 @@ class RLTradingEnv(gym.Env):
 
         plt.show()
 
+    def plot_current_predictions(self, mpl_palette: str = 'Set1', zoom_on_last_n_days: int = 60,
+                                 displayed_potential_tolerance: float = 0.5,
+                                 save_fig_directory: Union[str, Path] = None,
+                                 hidden: bool = False):
+        print('Creating the current prediction plot...')
+        price_dict = self.compute_predicted_prices()
+        ##### prepare plots:
+        fig, axs = plt.subplots(
+            len(price_dict) + 1,  # an extra row for each predictor
+            1, figsize=(9, 16),
+            gridspec_kw={'height_ratios': [3, 1, 1, 1]}  # compound upper plot 3x height
+        )
+        compound_ax = axs[0];
+        compound_ax.set_title('All Predictors')
+        cmap = plt.colormaps[mpl_palette]
+        color_list = [cmap(i) for i in range(len(price_dict))]
+
+        # predictor with smallest timescale:
+        finest_predictor_ind = np.argmin([pred.sampling_rate_minutes for pred in self.predictor_instances])
+        displayed_features = None  # will be efficiently inferred in for loop
+
+        ##### single prediction plotting:
+        for pred_ind, (pred_name, (features, prediction)) in enumerate(price_dict.items()):
+            # compound ax plot:
+            if pred_ind == finest_predictor_ind:  # features only for predictor with finest time-resolution
+                compound_ax.plot(features.index, features, marker='o', markevery=[-1], color='darkblue')
+                displayed_features = features.copy()
+            compound_ax.plot(prediction.index, prediction, marker='o', markevery=[-1], color=color_list[pred_ind],
+                             label=pred_name, linestyle='dashed')
+
+            # single ax plot:
+            pred_ax = axs[pred_ind + 1]
+            pred_ax.plot(features.index, features, marker='o', markevery=[-1], color='darkblue', label='Features')
+            pred_ax.plot(prediction.index, prediction, marker='o', markevery=[-1], color=color_list[pred_ind],
+                         label='Predictions', linestyle='dashed')
+            pred_ax.set_title(pred_name)
+
+        ##### include average potential in compound plot:
+        if displayed_features is None:
+            displayed_features = features.copy()
+        avg_predicted_price = displayed_features.iloc[-1] * (1 + self.current_avg_scaled_predicted_potential)
+        # if less or more of the potential is realised:
+        prediction_cone = (displayed_features.iloc[-1] * (
+                    1 + self.current_avg_scaled_predicted_potential * (1 - displayed_potential_tolerance)),
+                           displayed_features.iloc[-1] * (1 + self.current_avg_scaled_predicted_potential * (
+                                       1 + displayed_potential_tolerance)))
+        # assert that first element is the smaller one:
+        prediction_cone = (min(prediction_cone), max(prediction_cone))
+
+        avg_predicted_price_date = displayed_features.index.max() + pd.Timedelta(days=self.potential_horizon_days)
+        plot_dates = [displayed_features.index.max(), avg_predicted_price_date]
+        last_feature_value = displayed_features.iloc[-1]
+        compound_ax.plot(plot_dates,
+                         [last_feature_value, avg_predicted_price], marker='X', color='Blue',
+                         label='Average Predicted Potential')
+        compound_ax.fill_between(
+            x=plot_dates,
+            y1=[last_feature_value, prediction_cone[0]],
+            y2=[last_feature_value, prediction_cone[1]],
+            color='blue',
+            alpha=0.2,
+            label='Prediction Cone'
+        )
+
+        ##### eventual zoom-in:
+        if zoom_on_last_n_days is not None:
+            # adjust x-axis limits:
+            start_date = datetime.now() - pd.Timedelta(days=zoom_on_last_n_days)
+            compound_ax.set_xlim(start_date, None)
+
+            # filter the data within the new x_lim
+            all_values = pd.concat(
+                [tuple[0] for tuple in price_dict.values()] + [tuple[1] for tuple in price_dict.values()])
+            visible_data = all_values[(all_values.index >= start_date)]
+
+            # compute new y_lim based on the visible data and prediction cone:
+            new_y_min = min(visible_data.min().min(), prediction_cone[0])
+            new_y_max = max(visible_data.max().max(), prediction_cone[1])
+            compound_ax.set_ylim(new_y_min - (new_y_max - new_y_min) * .05,
+                                 new_y_max + (new_y_max - new_y_min) * .05)
+
+        ##### formatting:
+        for ax in axs:
+            ax.set_ylabel('Prices [USD]')
+            if ax == axs[-1]: ax.set_xlabel('Date')
+            ax.legend()
+            ax.grid()
+        fig.tight_layout()
+
+        ##### display and eventual saving:
+        if save_fig_directory is not None:  # eventually save result plot:
+            plt.savefig(save_fig_directory / filemgmt.file_title("Prediction Visualisation", ".png"))
+        plt.show()
 
 ####### Auxiliary Backtesting Functions #######
 def env_parametrisation_loop(env_price_sampling_rate_minutes: int,
