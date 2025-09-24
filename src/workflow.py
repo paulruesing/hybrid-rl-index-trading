@@ -24,6 +24,7 @@ from pathlib import Path
 from ctypes import c_char
 import multiprocessing
 import threading
+from selenium.common.exceptions import WebDriverException
 
 from src.utils.chatbot_app import create_app
 
@@ -74,7 +75,7 @@ data_manager = StockPriceDataManager(ticker_symbol='DAX',
                                     )
 
 pred_manager = PredictorManager(data_manager=data_manager, initialisation_dir=SAVED_MODELS, recursive=True,
-                                not_older_than_n_days=7,  # only recently fine-tuned models
+                                not_older_than_n_days=10,  # only recently fine-tuned models
                                 )
 
 portfolio = KOCertificateSet.load_from_csv(
@@ -299,6 +300,7 @@ def describe_best_backtests(criterion: Literal['Mean', 'Median', 'SharpeRatio'] 
         A formatted string describing the top `k_best` backtests based on the specified criterion.
     """
     backtest_frame = pd.read_csv(filemgmt.most_recent_file(SAVED_BACKTESTS))
+    backtest_frame.drop_duplicates(inplace=True, keep='first')
 
     # select only recent
     backtest_frame['date'] = pd.to_datetime(backtest_frame['date'])
@@ -441,7 +443,12 @@ def update_portfolio(issue_date_offset_days:int = 50) -> None:
 
     chatter("Fetching updated product data from boerse-frankfurt.")
     for product in portfolio.ko_certificates:
-        product.update_product_details_from_scrape(use_as_2nd_base_price=False)  # update product details from boerse-fra
+        try:
+            product.update_product_details_from_scrape(use_as_2nd_base_price=False)  # update product details from boerse-fra
+        except WebDriverException:
+            chatter(f"Couldn't update {product.isin}, will keep old information.")
+            continue
+        product.date_base_price_tuple2 = None
         product.enforce_base_price_increase_per_annum(abs_increase_pa=.03)
         product.issue_date = datetime.now() - pd.Timedelta(days=issue_date_offset_days)  # very short issue date
 
@@ -564,8 +571,8 @@ def update_env_predictors(types_to_include=("c2", "d2", "d3")) -> None:
 ###################### WORKFLOW DEFINITION ######################
 # day (of month), weekday, hour, minute
 function_schedule = {predict_and_trade: [None, [0, 1, 2, 3, 4], 16, 20],  # 20 minutes offset, because 15-min delayed prices and +5min to prevent errors
-                     update_portfolio: [None,[0, 1, 2, 3, 4], 15, 20],  # update portfolio details to prepare prediction
-                     fine_tune_predictors: [None, 5, 13, 0],
+                     update_portfolio: [None,[0, 1, 2, 3, 4], 16, 0],  # update portfolio details to prepare prediction
+                     fine_tune_predictors: [None, 2, 17, 0],
                      back_test_predictors: [None, 6, 13, 0],
                      parametrize_predictors: [15, None, 17, 0],
                      tell_time: [None, None, [13, 15] , [15, 45]],
@@ -711,10 +718,10 @@ def responsive_workflow_process(shared_input_str, shared_output_str, chatbot_inp
                 "describe predictor presets": describe_predictor_presets,
                 "describe best predictors": describe_best_predictors,
                 "describe best backtests": describe_best_backtests,
-                "do update environment": update_env_from_scrape,
-                "do update environment predictors": update_env_predictors,
-                "do step environment": predict_and_trade,
-                "do update portfolio": update_portfolio,
+                #"do update environment": update_env_from_scrape,
+                #"do update environment predictors": update_env_predictors,
+                #"do step environment": predict_and_trade,
+                #"do update portfolio": update_portfolio,
             }
             # commands:
             if input_str == last_chatbot_input:
@@ -748,6 +755,8 @@ def responsive_workflow_process(shared_input_str, shared_output_str, chatbot_inp
 
 def responsive_chatbot_process(shared_input_str, shared_output_str, chatbot_input_event, response_ready_event):
     print("Don't forget to turn on ngrok terminal process via\nngrok http 8000 --domain prompt-crayfish-cunning.ngrok-free.app")
+    chatter.test_connection()
+    print("Also, it is recommended to reply once to the chatbot template message, in case the number isn't verified anymore.")
     #os.system("../private/ngrok-server.sh")  # doesn't work
 
     # initialise app:

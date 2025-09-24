@@ -1345,7 +1345,7 @@ class RLTradingEnv(gym.Env):
         ##### prepare plots:
         fig, axs = plt.subplots(
             len(price_dict) + 1,  # an extra row for each predictor
-            1, figsize=(9, 16),
+            1, figsize=(10, 15),
             gridspec_kw={'height_ratios': [3, 1, 1, 1]}  # compound upper plot 3x height
         )
         compound_ax = axs[0];
