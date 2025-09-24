@@ -60,7 +60,7 @@ def timed_callback_decorator(callback: callable = print, interval_minutes=10):
     return decorator
 
 
-def retry_decorator(exceptions=(ValueError, AttributeError, IndexError, WebDriverException, TypeError),
+def retry_decorator(exceptions=(ValueError, AttributeError, IndexError, WebDriverException, TypeError, KeyError),
                     on_error_callback: callable = print,
                     retries: int = 1, delay: int = 1):
     """
