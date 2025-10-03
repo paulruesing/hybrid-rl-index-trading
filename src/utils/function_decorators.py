@@ -15,7 +15,6 @@ def timed_callback_decorator(callback: callable = print, interval_minutes=10):
     interval_minutes : int, optional
         The time interval in minutes between consecutive executions of the callback function. Defaults to 1 minute.
     """
-
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -24,23 +23,31 @@ def timed_callback_decorator(callback: callable = print, interval_minutes=10):
             stop_event = Event()
 
             def report_status():
-                # Save the start time and initialize the last_callback_time
-                start_time = time.time()
-                last_callback_time = start_time
+                # Save the start time and initialize timing variables
+                start_time_local = time.time()
+                last_callback_time = start_time_local
+                current_interval = interval_minutes  # Start with the initial interval
 
-                # Periodically calls the callback every `interval_minutes`
+                # Periodically calls the callback with increasing intervals
                 while not stop_event.is_set():
                     current_time = time.time()
-                    # Check if the interval has elapsed since the last callback
-                    if current_time >= last_callback_time + (interval_minutes * 60):
-                        elapsed_time = current_time - start_time
+                    # Check if the current interval has elapsed since the last callback
+                    if current_time >= last_callback_time + (current_interval * 60):
+                        elapsed_time = current_time - start_time_local
 
                         # Invoke callback with a status message
                         if not stop_event.is_set():
-                            callback(f"Function `{func.__name__}` running for {elapsed_time / 60:.2f} minutes...")
+                            callback(
+                                f"Function `{func.__name__}` running for {elapsed_time / 60:.2f} minutes... (next check in {current_interval * 2} minutes)")
 
                         # Update the last callback time
                         last_callback_time = current_time
+
+                        # Increase the interval by the current interval (exponential growth)
+                        current_interval += current_interval
+
+                    # Small sleep to prevent busy waiting
+                    time.sleep(1)
 
             # Start the thread that handles periodic callback execution
             status_thread = Thread(target=report_status, daemon=True)
