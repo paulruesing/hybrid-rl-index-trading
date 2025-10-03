@@ -7,6 +7,8 @@ from src.pipeline.chatbot import WhatsAppChatbot
 from src.utils.function_decorators import retry_decorator, timed_callback_decorator
 import src.pipeline.web_interaction as webinteraction
 import src.utils.file_management as filemgmt
+from src.utils.chatbot_app import create_app
+from src.pipeline.processing_tools import RobustEventManager, FortifiedSharedMemory, check_schedule, verify_schedule, check_request_mapping
 
 from datetime import datetime
 import time
@@ -26,7 +28,6 @@ import multiprocessing
 import threading
 from selenium.common.exceptions import WebDriverException
 
-from src.utils.chatbot_app import create_app
 
 ###################### VARIABLES ######################
 ROOT = Path().resolve().parent
@@ -111,6 +112,8 @@ chatter = WhatsAppChatbot("../private/chatbot.env", verbose=True)
 
 
 ###################### DESCRIPTIVE FUNCTIONS ######################
+# Many functions in the following could be moved to separate files. However, they need to remain here, since they
+# are called without providing arguments in the latter scheduler workflow.
 def describe_portfolio() -> str:
     """
     Provides a textual summary of the portfolio by describing the Knock-Out certificates within it.
@@ -461,6 +464,7 @@ def update_portfolio(issue_date_offset_days:int = 50) -> None:
         underlying_price_series=data_manager.non_etf_env_interp_prices, )
     chatter("Successfully updated portfolio.")
 
+
 @timed_callback_decorator(callback=chatter)
 @retry_decorator(on_error_callback=chatter)
 def update_env_from_scrape(add_missing_isins: bool = False) -> tuple[float, float, dict[str, float], dict[str, float]]:
@@ -519,6 +523,13 @@ def predict_and_trade(add_missing_isins: bool = False):
     ### infer new action:
     action, _ = agent.predict(env.current_observation)  # predict action
     env.plot_current_predictions(save_fig_directory=PREDICTION_PLOTS, hidden=False)  # save prediction plot
+    chatter(str(env.current_avg_scaled_predicted_potential))
+
+    # read out all required observations before stepping (because then new observations are yielded):
+    potential_estimates = env.current_potential_estimates
+    avg_potential = env.current_avg_scaled_predicted_potential
+
+    # implement action:
     trade_implementor = TradeImplementor()  # log class
     new_obs, _, done, truncated, info = env.step(action, track_portfolio_exposure=False,
                                                  start_new_episode_if_finished=False,
@@ -527,9 +538,9 @@ def predict_and_trade(add_missing_isins: bool = False):
     # status messages:
     predictions_str_list = [f"{round(potential * 100, 2)} % in {round(horizon_minutes / 60 / 14)} days" for
                             potential, horizon_minutes in
-                            zip(env.current_potential_estimates, env.observation_horizons_minutes)]
+                            zip(potential_estimates, env.observation_horizons_minutes)]
     prediction_str = "\n".join(predictions_str_list)  # will be included in next str:
-    explanatory_string = f"Based on the *predictions*\n\n{prediction_str}\n\n-> an *average predicted potential of {env.current_avg_scaled_predicted_potential * 100:.2f} %* in {env.potential_horizon_days} days, the agent wants to *{info['Action']}*!"
+    explanatory_string = f"Based on the *predictions*\n\n{prediction_str}\n\n-> an *average predicted potential of {avg_potential * 100:.2f} %* in {env.potential_horizon_days} days, the agent wants to *{info['Action']}*!"
     chatter.send_message(message=explanatory_string,  # include prediction plot
                          image_path=filemgmt.most_recent_file(PREDICTION_PLOTS, ".png", "Prediction Visualisation"))
 
@@ -561,203 +572,169 @@ def update_env_predictors(types_to_include=("c2", "d2", "d3")) -> None:
     types_to_include : tuple of str, optional
         A tuple of predictor types to include (e.g., "c2", "d2", "d3"). Default is ("c2", "d2", "d3").
     """
+    # status message:
+    chatter("Updating env predictors from:")
+    chatter(describe_env_predictors())
+
+    # update:
     preds_to_include = [pred_manager.get_predictors_by_type_sorted(architecture='LSTM',
                                                                    preset_type=p_type,
                                                                    return_instances=True,
                                                                    k_best=1)[0] for p_type in types_to_include]
     env.predictor_instances = preds_to_include
 
+    # status message:
+    chatter("to:")
+    chatter(describe_env_predictors())
+    chatter("Done!")
+
 
 ###################### WORKFLOW DEFINITION ######################
 # day (of month), weekday, hour, minute
 function_schedule = {predict_and_trade: [None, [0, 1, 2, 3, 4], 16, 20],  # 20 minutes offset, because 15-min delayed prices and +5min to prevent errors
                      update_portfolio: [None,[0, 1, 2, 3, 4], 16, 0],  # update portfolio details to prepare prediction
-                     fine_tune_predictors: [None, 2, 17, 0],
+                     fine_tune_predictors: [None, 5, 13, 0],
                      back_test_predictors: [None, 6, 13, 0],
                      parametrize_predictors: [15, None, 17, 0],
                      tell_time: [None, None, [13, 15] , [15, 45]],
                      }
 
+request_map = {
+    "describe portfolio": describe_portfolio,
+    "describe agent": describe_agent,
+    "describe open positions": describe_open_positions,
+    "describe environment predictors": describe_env_predictors,
+    "describe workflows": describe_workflows,
+    "describe predictor presets": describe_predictor_presets,
+    "describe best predictors": describe_best_predictors,
+    "describe best backtests": describe_best_backtests,
+    "do update environment": update_env_from_scrape,
+    "do update environment predictors": update_env_predictors,
+    "do step environment": predict_and_trade,
+    "do update portfolio": update_portfolio,
+    "do finetuning": fine_tune_predictors,
+}
 
 ###################### PROCESS DEFINITIONS ######################
-def responsive_workflow_process(shared_input_str, shared_output_str, chatbot_input_event, response_ready_event):
+def responsive_workflow_process(shared_input_str: multiprocessing.Array, shared_output_str: multiprocessing.Array,
+                                input_lock: multiprocessing.Lock, output_lock: multiprocessing.Lock,
+                                chatbot_input_event: multiprocessing.Event, response_ready_event: multiprocessing.Event):
     """
-    This function is designed to run continuously in a loop and must be executed within a multiprocess/multithread environment.
-    The function handles scheduled execution of tasks based on a predefined schedule (`function_schedule`) and processes chatbot input requests in parallel.
-    A synchronized and efficient mechanism is implemented for inter-process communication, using shared memory and event triggers.
-    
+    Continuously handle scheduled task execution and process chatbot input/output through shared memory in a multiprocess environment.
+
+    This function operates an infinite loop that checks and executes scheduled tasks, listens for chatbot input signals,
+    processes the input by matching to predefined mapped functions or responses, and writes the responses back to shared memory with proper synchronization.
+    Events and locks ensure inter-process communication is thread-safe.
+
     Parameters
     ----------
     shared_input_str : multiprocessing.Array
-        Shared memory object for storing the input string from a chatbot interface.
-        It is expected to be a byte array that supports inter-process communication.
+        Shared byte array containing input string data from chatbot interface.
 
     shared_output_str : multiprocessing.Array
-        Shared memory object for storing the output string that will be sent to the chatbot.
-        It is expected to be a byte array and will store the chatbot's response in a similarly encoded format.
+        Shared byte array for placing chatbot output responses.
+
+    input_lock : multiprocessing.Lock
+        Lock used to synchronize reading from shared_input_str.
+
+    output_lock : multiprocessing.Lock
+        Lock used to synchronize writing to shared_output_str.
 
     chatbot_input_event : multiprocessing.Event
-        Event object used to signal when the chatbot input string is ready to be processed.
+        Event indicating when new chatbot input data is available.
 
     response_ready_event : multiprocessing.Event
-        Event object used to signal when the chatbot response has been generated 
-        and is ready to be accessed by the interfacing process.
+        Event indicating when chatbot response data is ready.
+
+    Returns
+    -------
+    None
 
     Notes
     -----
-    - Task scheduling allows execution based on day, weekday, hour, and minute, and prevents multiple executions at the same scheduled time.
-    - Input in `shared_input_str` undergoes mapping for specific requests, and if unrecognized, it responds with potential options.
-    - Proper byte encoding and padding mechanisms are used to ensure seamless shared memory operations.
+    - Scheduled tasks execute based on timing criteria (day, weekday, hour, minute) without repeating multiple times per scheduled moment.
+    - Chatbot input triggers processing against a request map to dispatch associated functions or provide predefined responses.
+    - Shared memory strings are padded with null bytes for consistent memory size and safe inter-process sharing.
     """
-    ############# SCHEDULER THREAD ##############
-    def execute_scheduled_functions():
-        """
-        Separate function definition to run the scheduler in another thread.
-        """
-        # sanity check, consecutive minutes are not allowed in the schedule of one function (because that is the smallest
-        # time unit in which we check for multiple executions)
-        for func, schedule in function_schedule.items():
-            _, _ , _, minute = schedule
-            if isinstance(minute, list):
-                for entry in minute:
-                    if entry + 1 in minute:
-                        raise ValueError(f"Consecutive minutes are not allowed! Please amend the schedule of {func.__name__}.")
+    # prepare scheduler
+    verify_schedule(function_schedule)
+    was_executed = [False] * len(function_schedule.keys())  # bools to prevent multiple execution
 
-        was_executed = [False] * len(function_schedule.keys())  # bools to prevent multiple execution
-
-        # run schedule checker
-        while True:
-            now = datetime.now()
-            for func_ind, (func, schedule) in enumerate(function_schedule.items()):
-                day, weekday, hour, minute = schedule
-
-                execute = True
-                # check schedule
-                if day is not None:
-                    if isinstance(day, list):
-                        if now.day not in day or was_executed[func_ind]:
-                            execute = False
-                    elif now.day != day or was_executed[func_ind]:
-                        execute = False
-
-                if weekday is not None:
-                    if isinstance(weekday, list):
-                        if now.weekday() not in weekday or was_executed[func_ind]:
-                            execute = False
-                    elif now.weekday() != weekday or was_executed[func_ind]:
-                        execute = False
-
-                if hour is not None:
-                    if isinstance(hour, list):
-                        if now.hour not in hour or was_executed[func_ind]:
-                            execute = False
-                    elif now.hour != hour or was_executed[func_ind]:
-                        execute = False
-
-                if minute is not None:
-                    if isinstance(minute, list):
-                        if now.minute not in minute or was_executed[func_ind]:
-                            execute = False
-                    elif now.minute != minute or was_executed[func_ind]:
-                        execute = False
-
-                # execute function
-                if execute:
-                    func()
-                    was_executed[func_ind] = True
-
-                # reset was_executed for the next scheduled time
-                reset = True
-                # check only the smallest provided timescale, because that is enough reason to reset
-                if minute is not None:
-                    if isinstance(minute, list) and now.minute - 1 not in minute:
-                        reset = False
-                    elif not isinstance(minute, list) and now.minute - 1 != minute:
-                        reset = False
-                elif hour is not None:
-                    if isinstance(hour, list) and now.hour - 1 not in hour:
-                        reset = False
-                    elif not isinstance(hour, list) and now.hour - 1 != hour:
-                        reset = False
-                elif weekday is not None:
-                    if isinstance(weekday, list) and now.weekday() - 1 not in weekday:
-                        reset = False
-                    elif not isinstance(weekday, list) and now.weekday() - 1 != weekday:
-                        reset = False
-                elif day is not None:
-                    if isinstance(day, list) and now.day - 1 not in day:
-                        reset = False
-                    elif not isinstance(day, list) and now.day - 1 != day:
-                        reset = False
-
-                # conduct reset if we are in the next scheduled time:
-                if reset: was_executed[func_ind] = False
-        #### end of scheduler function definition
-
-    # run scheduler in another thread:
-    schedule_thread = threading.Thread(target=execute_scheduled_functions,
-                                       daemon=True)  # daemon leads to termination of thread if main process terminates
-    schedule_thread.start()
-
-    ############# CHATBOT THREAD ##############
-    global last_chatbot_input
+    # prepare chatbot:
     last_chatbot_input = ""
+
+    # run while loop:
     while True:
+        #### SCHEDULER ####
+        execute, func, was_executed = check_schedule(function_schedule, was_executed)
+        if execute: func()
+
+        #### CHATBOT ANSWERER ####
         ##### at each iteration, check whether the connected chatbot process needs to read out information:
         if chatbot_input_event.is_set():
             # read out shared_input_str value and remove 0-byte-padding
-            input_str = shared_input_str.value.rstrip(b"\x00").decode("utf-8")
+            with input_lock:
+                input_str = shared_input_str.value.rstrip(b"\x00").decode("utf-8")
 
-            # generate response:
-            request_map = {
-                "describe portfolio": describe_portfolio,
-                "describe agent": describe_agent,
-                "describe open positions": describe_open_positions,
-                "describe environment predictors": describe_env_predictors,
-                "describe workflows": describe_workflows,
-                "describe predictor presets": describe_predictor_presets,
-                "describe best predictors": describe_best_predictors,
-                "describe best backtests": describe_best_backtests,
-                #"do update environment": update_env_from_scrape,
-                #"do update environment predictors": update_env_predictors,
-                #"do step environment": predict_and_trade,
-                #"do update portfolio": update_portfolio,
-            }
-            # commands:
-            if input_str == last_chatbot_input:
-                output = "You wrote the same query as last time. Please write something different first. This helps to prevent redundant executions."
-            elif input_str.lower()[:2] == "do" and input_str.lower() in request_map:
-                _ = request_map[input_str.lower()]()
-                output = "Done!"
-            # descriptions:
-            elif input_str.lower() in request_map:
-                output = str(request_map[input_str.lower()]())
-            elif "describe " + input_str.lower().strip() in request_map:
-                output = str(request_map["describe " + input_str.lower().strip()]())
-            elif input_str == "":
-                output = ""  # empty input -> empty response
-            else:
-                output = "*Possible inputs are:*\n\n" + "\n".join(request_map.keys())
+            # compare mapping:
+            last_chatbot_input, execute_func, describe_func, output_str = check_request_mapping(request_map, input_str, last_chatbot_input)
 
-            # reset last input
-            last_chatbot_input = input_str
+            # execute request:
+            if describe_func is not None: output = describe_func()
+            elif execute_func is not None: execute_func(); output = 'Done!'
+            elif output_str is not None: output = output_str
 
             # write in shared memory (properly encoded to bytes)
             max_length = len(shared_output_str)  # Determine the maximum length
             truncated_output = output[:max_length]  # prepare overflow
-            shared_output_str.value = truncated_output.encode("utf-8").ljust(max_length, b'\x00')
+            with output_lock:
+                shared_output_str.value = truncated_output.encode("utf-8").ljust(max_length, b'\x00')
 
             # send event trigger to continue other process:
             response_ready_event.set()
             chatbot_input_event.clear()  # clear input event
-            shared_input_str.value = b"\x00" * max_length  # clear output str
+            with input_lock:
+                shared_input_str.value = b"\x00" * max_length  # clear output str
 
 
-def responsive_chatbot_process(shared_input_str, shared_output_str, chatbot_input_event, response_ready_event):
+def responsive_chatbot_process(shared_input_str: multiprocessing.Array, shared_output_str: multiprocessing.Array,
+                               input_lock: multiprocessing.Lock, output_lock: multiprocessing.Lock,
+                               chatbot_input_event: multiprocessing.Event, response_ready_event: multiprocessing.Event):
+    """
+    Start a Flask app providing a chatbot interface that interacts through shared memory for input and output.
+
+    This function initializes a Flask app with a custom response function that communicates with another process
+    via shared memory buffers and synchronization primitives (locks and events). It listens for input strings
+    from the shared input buffer, signals the other process to process the input, waits for the response,
+    and then returns it.
+
+    Parameters
+    ----------
+    shared_input_str : multiprocessing.Array
+        Shared byte array for input string to the chatbot, used for inter-process communication.
+
+    shared_output_str : multiprocessing.Array
+        Shared byte array for output string from the chatbot, used for inter-process communication.
+
+    input_lock : multiprocessing.Lock
+        Lock object to synchronize access to the shared_input_str.
+
+    output_lock : multiprocessing.Lock
+        Lock object to synchronize access to the shared_output_str.
+
+    chatbot_input_event : multiprocessing.Event
+        Event to signal that new chatbot input has been placed in shared memory.
+
+    response_ready_event : multiprocessing.Event
+        Event to signal that a chatbot response is ready in shared memory.
+
+    Returns
+    -------
+    None
+    """
     print("Don't forget to turn on ngrok terminal process via\nngrok http 8000 --domain prompt-crayfish-cunning.ngrok-free.app")
     chatter.test_connection()
     print("Also, it is recommended to reply once to the chatbot template message, in case the number isn't verified anymore.")
-    #os.system("../private/ngrok-server.sh")  # doesn't work
 
     # initialise app:
     app = create_app()
@@ -771,15 +748,18 @@ def responsive_chatbot_process(shared_input_str, shared_output_str, chatbot_inpu
         truncated_input = input_str[:max_length]
 
         # trigger listening of other process:
-        shared_output_str.value = b"\x00" * max_length  # clear output str
+        with output_lock:
+            shared_output_str.value = b"\x00" * max_length  # clear output str
         chatbot_input_event.set()
 
         # amend shared_input_str to fill entire space allocated for shared_input_str and pads it with zero bytes
-        shared_input_str.value = truncated_input.encode("utf-8").ljust(max_length, b'\x00')
+        with input_lock:
+            shared_input_str.value = truncated_input.encode("utf-8").ljust(max_length, b'\x00')
 
         # retrieve output and again stripping it of the 0-byte-padding:
         response_ready_event.wait()  # wait for response event
-        output = shared_output_str.value.rstrip(b'\x00').decode("utf-8")
+        with output_lock:
+            output = shared_output_str.value.rstrip(b'\x00').decode("utf-8")
 
         response_ready_event.clear()  # clear response event
         return output
@@ -792,27 +772,101 @@ def responsive_chatbot_process(shared_input_str, shared_output_str, chatbot_inpu
 
 ###################### PROCESS EXECUTION ######################
 if __name__ == "__main__":
-    ### initialise shared memory for inter-process communication:
-    str_len = 3000  # fixed for shared memory
+    #can the initialise shared memory for inter-process communication:
+    fsm = FortifiedSharedMemory(str_len=3000)
 
-    # create shared ctypes arrays for strings:
-    shared_input_str = multiprocessing.Array(c_char, str_len)
-    shared_output_str = multiprocessing.Array(c_char, str_len)
+    # define processes:
+    p1 = multiprocessing.Process(
+        target=responsive_workflow_process,
+        args=(
+            fsm.shared_input_str, fsm.shared_output_str,  # shared memory
+            fsm.input_lock, fsm.output_lock,  # locks
+            fsm.chatbot_input_event, fsm.response_ready_event  # events
+        ), name="WorkflowProcess")
+    p2 = multiprocessing.Process(
+        target=responsive_chatbot_process,
+        args=(
+            fsm.shared_input_str, fsm.shared_output_str,
+            fsm.input_lock, fsm.output_lock,
+            fsm.chatbot_input_event, fsm.response_ready_event
+        ), name="ChatbotProcess")
 
-    # initialise with empty strings:
-    shared_input_str.value = b"\x00" * str_len
-    shared_output_str.value = b"\x00" * str_len
+    # start processes:
+    try:
+        p1.start()
+        p2.start()
 
-    # trigger_event for timing of response read-out:
-    chatbot_input_event = multiprocessing.Event()
-    response_ready_event = multiprocessing.Event()
+        # Wait for processes with timeout
+        p1.join()  #timeout=300)  # 5 minute timeout (unused currently, main script ends anyway)
+        p2.join()  #timeout=300)
 
-    # trigger processes:
-    p1 = multiprocessing.Process(target=responsive_workflow_process, args=(shared_input_str, shared_output_str, chatbot_input_event, response_ready_event), name="WorkflowProcess")
-    p2 = multiprocessing.Process(target=responsive_chatbot_process, args=(shared_input_str, shared_output_str, chatbot_input_event, response_ready_event), name="ChatbotProcess")
+    except KeyboardInterrupt:
+        print("Terminating processes...")
+        p1.terminate()
+        p2.terminate()
+        p1.join()
+        p2.join()
 
-    p1.start()
-    p2.start()
+    finally:
+        # Cleanup if using shared_memory
+        print("Cleanup completed")
 
-    p1.join()
-    p2.join()
+
+
+####### FUNCTION GRAVEYARD #######
+"""
+# todo: consider changing the structure -> chatbot as separate thread (restricted resources) and scheduler as main
+def responsive_separated_workflow_process(shared_input_str, shared_output_str, input_lock, output_lock, chatbot_input_event, response_ready_event):
+    ############# SCHEDULER THREAD ##############
+    def execute_scheduled_functions():
+        '''
+        Separate function definition to run the scheduler in another thread.
+        '''
+        # prepare scheduler:
+        verify_schedule(function_schedule)
+        was_executed = [False] * len(function_schedule.keys())  # bools to prevent multiple execution
+
+        # run schedule checker
+        while True:
+            #### SCHEDULER ####
+            execute, func, was_executed = check_schedule(function_schedule, was_executed)
+            if execute: func()
+
+    # run scheduler in another thread:
+    schedule_thread = threading.Thread(target=execute_scheduled_functions,
+                                       daemon=True)  # daemon leads to termination of thread if main process terminates
+    schedule_thread.start()
+
+    ############# CHATBOT THREAD ##############
+    global last_chatbot_input
+    last_chatbot_input = ""
+    while True:
+        ##### at each iteration, check whether the connected chatbot process needs to read out information:
+        if chatbot_input_event.is_set():
+            # read out shared_input_str value and remove 0-byte-padding
+            with input_lock:
+                input_str = shared_input_str.value.rstrip(b"\x00").decode("utf-8")
+
+            # compare mapping:
+            last_chatbot_input, execute_func, describe_func, output_str = check_request_mapping(request_map, input_str, last_chatbot_input)
+
+            # execute request:
+            if describe_func is not None:
+                output = describe_func()
+            elif execute_func is not None:
+                execute_func(); output = 'Done!'
+            elif output_str is not None:
+                output = output_str
+
+            # write in shared memory (properly encoded to bytes)
+            max_length = len(shared_output_str)  # Determine the maximum length
+            truncated_output = output[:max_length]  # prepare overflow
+            with output_lock:
+                shared_output_str.value = truncated_output.encode("utf-8").ljust(max_length, b'\x00')
+
+            # send event trigger to continue other process:
+            response_ready_event.set()
+            chatbot_input_event.clear()  # clear input event
+            with input_lock:
+                shared_input_str.value = b"\x00" * max_length  # clear output str
+"""
