@@ -16,7 +16,7 @@ dependencies:
   - yfinance=0.2.54
   - pip:
       - notebook
-      - gym
+      - gymnasium
       - selenium
       - stable-baselines3
       - shimmy
