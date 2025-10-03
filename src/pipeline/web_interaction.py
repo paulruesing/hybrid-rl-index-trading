@@ -461,4 +461,6 @@ def scrape_portfolio_holdings_from_wikifolio(driver: webdriver.Chrome) -> tuple[
         shares_p_isin_dict[isin] = shares_count
         price_p_isin_dict[isin] = price
 
+    wf_cash = max(0, wf_cash)  # because sometimes, neg. prices can arise in wikifolio -> this prevents weird behaviour
+
     return wf_cash, wf_total, shares_p_isin_dict, price_p_isin_dict
