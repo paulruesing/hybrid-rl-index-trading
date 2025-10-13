@@ -51,6 +51,7 @@ PREDICTION_PLOTS = ROOT / "output" / "prediction_plots"
 
 PRIVATE_FILES = ROOT / "private"
 AV_API_KEY_FILE = PRIVATE_FILES / "Alpha Vantage API Key.txt"
+SCHEDULE_DIARY_FILE = PRIVATE_FILES / "schedule_diary.txt"
 with open(AV_API_KEY_FILE) as file: AV_API_KEY = file.read()
 
 WIKIFOLIO_KEY_FILE = PRIVATE_FILES / "Wikifolio key.txt"
@@ -76,7 +77,7 @@ data_manager = StockPriceDataManager(ticker_symbol='DAX',
                                     )
 
 pred_manager = PredictorManager(data_manager=data_manager, initialisation_dir=SAVED_MODELS, recursive=True,
-                                not_older_than_n_days=10,  # only recently fine-tuned models
+                                not_older_than_n_days=15,  # only recently fine-tuned models
                                 )
 
 portfolio = KOCertificateSet.load_from_csv(
@@ -448,7 +449,7 @@ def update_portfolio(issue_date_offset_days:int = 50) -> None:
     for product in portfolio.ko_certificates:
         try:
             product.update_product_details_from_scrape(use_as_2nd_base_price=False)  # update product details from boerse-fra
-        except WebDriverException:
+        except (WebDriverException, KeyError):
             chatter(f"Couldn't update {product.isin}, will keep old information.")
             continue
         product.date_base_price_tuple2 = None
@@ -523,7 +524,6 @@ def predict_and_trade(add_missing_isins: bool = False):
     ### infer new action:
     action, _ = agent.predict(env.current_observation)  # predict action
     env.plot_current_predictions(save_fig_directory=PREDICTION_PLOTS, hidden=False)  # save prediction plot
-    chatter(str(env.current_avg_scaled_predicted_potential))
 
     # read out all required observations before stepping (because then new observations are yielded):
     potential_estimates = env.current_potential_estimates
@@ -589,15 +589,110 @@ def update_env_predictors(types_to_include=("c2", "d2", "d3")) -> None:
     chatter("Done!")
 
 
+def log_execution(function):
+    """
+    Updates the schedule entry line in the diary file for the specified function name.
+    If the function name line exists, it replaces it with the new line.
+    If not, it appends the new line at the end.
+
+    Parameters
+    ----------
+    function: callable
+        Function to log execution for.
+
+    Returns
+    -------
+    None
+    """
+    # current time and function name:
+    now = datetime.now()
+    day_of_month, weekday, hour, minute = now.day, now.weekday(), now.hour, now.minute
+    function_name = function.__name__
+
+    # assemble new line:
+    new_line = f"{function_name} --- {day_of_month}, {weekday}, {hour}, {minute}\n"
+    updated = False
+
+    # Read all lines from the file
+    with open(SCHEDULE_DIARY_FILE, 'r') as f:
+        lines = f.readlines()
+
+    # Iterate and update the matching line
+    for i, line in enumerate(lines):
+        if line.startswith(function_name):
+            lines[i] = new_line
+            updated = True
+            break
+
+    # If no existing line found, append the new line
+    if not updated:
+        lines.append("\n" + new_line)
+
+    # Write the updated lines back to the file
+    with open(SCHEDULE_DIARY_FILE, 'w') as f:
+        f.writelines(lines)
+
+
 ###################### WORKFLOW DEFINITION ######################
 # day (of month), weekday, hour, minute
-function_schedule = {predict_and_trade: [None, [0, 1, 2, 3, 4], 16, 20],  # 20 minutes offset, because 15-min delayed prices and +5min to prevent errors
+function_schedule = {predict_and_trade: [None, [0, 1, 2, 3, 4], 16, 25],  # 20 minutes offset, because 15-min delayed prices and +5min to prevent errors
                      update_portfolio: [None,[0, 1, 2, 3, 4], 16, 0],  # update portfolio details to prepare prediction
                      fine_tune_predictors: [None, 5, 13, 0],
                      back_test_predictors: [None, 6, 13, 0],
                      parametrize_predictors: [15, None, 17, 0],
                      tell_time: [None, None, [13, 15] , [15, 45]],
                      }
+
+def check_schedule_diary():
+    """
+    Compares scheduling information in a diary file to a provided dictionary.
+
+    Notes
+    -----
+    Expects lines in the diary file to be formatted as: '<key> --- <schedule>'
+    Only lines starting with keys in `function_schedule` will be compared.
+    """
+    results = {}
+    # Open the diary file in read mode and process line by line
+    with open(SCHEDULE_DIARY_FILE, 'r') as f:
+        for line in f:
+            line = line.strip()
+            # Check each function name in the dictionary
+            for function, expected_schedule in function_schedule.items():
+                func_key = function.__name__
+                if line.startswith(func_key):
+                    # Split the line on ' --- ' to separate key and value, and type-convert the values:
+                    last_execution = [int(str) for str in line.split(' --- ')[1].split(', ')]
+
+                    # current time for comparison:
+                    now = datetime.now()
+                    current_times = now.day, now.weekday(), now.hour, now.minute
+
+                    # start for by assuming there's no missed execution:
+                    missed_exec = False
+                    for last, expected, current in zip(last_execution, expected_schedule, current_times):
+                        if missed_exec: continue  # if one time-unit already points out that execution was missed, that's sufficient
+                        # if scheduled for multiple timepoints, pick either
+                        if isinstance(expected, list):
+                            if current in expected:  # the current or
+                                expected = current
+                            else:  # the latest before
+                                smaller_scheduled_times = [i for i in expected if i < current]
+                                expected = smaller_scheduled_times[-1]  # last scheduled time
+
+                        if expected is None:  # if regular execution is desired:
+                            expected = current - 1  # then the previous timestamp should be the execution
+
+                        missed_exec = (last < expected < current)
+                        # if wasn't executed in expected time unit and current time unit alreaddy surpassed the expected
+                        # then execution was missed. If that time-unit is not specified, skip (or set to False) and
+                        # check the specified ones
+
+                    # status message:
+                    weekday_dict = {0: "monday", 1: "tuesday", 2: "wednesday", 3: "thursday", 4: "friday", 5: "saturday", 6: "sunday"}
+                    info_statement = f"Function {func_key} was last executed on day {last_execution[0]} ({weekday_dict[last_execution[1]]}) at {last_execution[2]}h{last_execution[3]}min."
+                    check_statement = "This is within the schedule." if not missed_exec else "*Hence, at least one scheduled execution was missed. Manual re-execution is recommended!*"
+                    chatter(info_statement + "\n" + check_statement)
 
 request_map = {
     "describe portfolio": describe_portfolio,
@@ -613,6 +708,9 @@ request_map = {
     "do step environment": predict_and_trade,
     "do update portfolio": update_portfolio,
     "do finetuning": fine_tune_predictors,
+    "do backtesting": back_test_predictors,
+    "do parametrisation": parametrize_predictors,
+    "do check schedule": check_schedule_diary,
 }
 
 ###################### PROCESS DEFINITIONS ######################
@@ -667,7 +765,7 @@ def responsive_workflow_process(shared_input_str: multiprocessing.Array, shared_
     while True:
         #### SCHEDULER ####
         execute, func, was_executed = check_schedule(function_schedule, was_executed)
-        if execute: func()
+        if execute: func(); log_execution(func)
 
         #### CHATBOT ANSWERER ####
         ##### at each iteration, check whether the connected chatbot process needs to read out information:
@@ -681,7 +779,7 @@ def responsive_workflow_process(shared_input_str: multiprocessing.Array, shared_
 
             # execute request:
             if describe_func is not None: output = describe_func()
-            elif execute_func is not None: execute_func(); output = 'Done!'
+            elif execute_func is not None: execute_func(); output = 'Done!'; log_execution(execute_func)
             elif output_str is not None: output = output_str
 
             # write in shared memory (properly encoded to bytes)
