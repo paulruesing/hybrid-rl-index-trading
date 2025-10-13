@@ -345,7 +345,7 @@ class TransformerModel(nn.Module):
         temp_loader = DataLoader(dataloader.dataset, batch_size=1, shuffle=False)
 
         with torch.no_grad():
-            for idx, (x, y) in enumerate(tqdm(temp_loader)):
+            for idx, (x, y) in enumerate(tqdm(temp_loader, ncols=200)):
                 x = x.to(device)
                 out = self(x)
                 out = out.cpu().detach().numpy()
@@ -622,7 +622,7 @@ class LSTMModel(nn.Module):
 
         # compute predictions:
         with torch.no_grad():
-            for idx, (x, y) in enumerate(tqdm(temp_loader)):
+            for idx, (x, y) in enumerate(tqdm(temp_loader, ncols=200)):
                 x = x.to(device)
                 out = self(x)  # run model
                 out = out.cpu().detach().numpy()
@@ -1186,7 +1186,8 @@ class NNPredictor:
 
         # training loop:
         progress_bar = tqdm(range(self.n_train_epochs),
-                            desc=f'Train loss: - | Val Loss: - | Patience {'/' if self.early_stopping_patience == 0 else f'{0}/{self.early_stopping_patience}'} | LRate: - | Progress')
+                            desc=f'Train loss: - | Val Loss: - | Patience {'/' if self.early_stopping_patience == 0 else f'{0}/{self.early_stopping_patience}'} | LRate: - | Progress',
+                            ncols=200)
         loss_train_history, loss_val_history = [], []
         for epoch in progress_bar:
             # eventually visualise training progress:
