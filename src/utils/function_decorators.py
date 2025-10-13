@@ -3,7 +3,7 @@ from functools import wraps
 from threading import Thread, Event
 from selenium.common.exceptions import WebDriverException
 
-def timed_callback_decorator(callback: callable = print, interval_minutes=10):
+def timed_callback_decorator(callback: callable = print, interval_minutes=5):
     """
     Function decorator that times the wrapped function and executes a callback periodically.
 
