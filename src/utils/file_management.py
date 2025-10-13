@@ -37,6 +37,7 @@ def most_recent_file(directory: Union[Path, str], suffix_to_consider: str = None
                 # check for latest csv with ticker in title
                 if suffix_to_consider is not None:
                     if not file.endswith(suffix_to_consider): continue
+                elif '.DS_Store' in file: continue
 
                 # check provided keywords
                 if file_title_keywords is not None:  # if provided
