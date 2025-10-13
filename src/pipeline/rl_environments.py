@@ -1572,7 +1572,10 @@ def env_parametrisation_loop(env_price_sampling_rate_minutes: int,
             new_frame = pd.concat([previous_frame, results], ignore_index=True)
         except ValueError:  # otherwise just save result
             new_frame = results
-        new_frame.drop_duplicates(inplace=True)
+        try:
+            new_frame.drop_duplicates(inplace=True)
+        except TypeError as err:
+            print("Error during duplicate removal:", err)
         new_frame.to_csv(backtest_database_dir / filemgmt.file_title("Backtest Database", ".csv"), index=False)
 
     return results
