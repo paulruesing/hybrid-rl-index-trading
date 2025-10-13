@@ -2,8 +2,6 @@ import multiprocessing
 from ctypes import c_char
 from datetime import datetime
 
-from src.workflow import request_map
-
 
 class RobustEventManager:
     """ Triggers events and safely waits for triggers while preventing deadlocks through timeouts. """
