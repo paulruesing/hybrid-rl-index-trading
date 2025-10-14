@@ -1378,7 +1378,7 @@ class RLTradingEnv(gym.Env):
         fig, axs = plt.subplots(
             len(price_dict) + 1,  # an extra row for each predictor
             1, figsize=(10, 15),
-            gridspec_kw={'height_ratios': [3, 1, 1, 1]}  # compound upper plot 3x height
+            gridspec_kw={'height_ratios': [3] + [1] * len(self.predictor_instances)}  # compound upper plot 3x height
         )
         compound_ax = axs[0];
         compound_ax.set_title('All Predictors')
