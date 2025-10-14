@@ -371,7 +371,7 @@ def parametrize_predictors():
 
 @timed_callback_decorator(callback=chatter)
 @retry_decorator(on_error_callback=chatter)
-def back_test_predictors(presets_to_consider=("b1", "b2", "c1", "c2", "d1", "d2", "d3"),
+def back_test_predictors(presets_to_consider: [str] = ("b1", "b2", "c1", "c2", "d1", "d2", "d3"),
                          n_predictors_range: [int] = (1, 3),
                          architectures_to_consider: [str] = ("LSTM",),):
     """
@@ -408,7 +408,9 @@ def back_test_predictors(presets_to_consider=("b1", "b2", "c1", "c2", "d1", "d2"
             if len(list_entry) > 0: predictor_list.append(list_entry)
 
     # status message:
-    chatter(f"Will now backtest {len(predictor_list)} combinations of predictors, each taking approx. 10 minutes to complete, hence estimating a total of {len(predictor_list)*10/60:.2f} hours.")
+    estimated_time_per_backtest = 45  # seconds
+    chatter(f"Will now backtest {len(predictor_list)} combinations of predictors, each taking ~{estimated_time_per_backtest} seconds to complete, hence estimating a total of {len(predictor_list)*estimated_time_per_backtest*2/60:.2f} minutes.")
+    # factor 2 to reflect the other varying params
 
     print(predictor_list)
     env_parametrisation_loop(
@@ -418,10 +420,10 @@ def back_test_predictors(presets_to_consider=("b1", "b2", "c1", "c2", "d1", "d2"
             backtest_database_dir=SAVED_BACKTESTS,
             # varying params:
             predictor_instances=predictor_list,
+            trading_quantity_per_leverage_factor=[1.25, 2.5],  # if changing something here, change the factors in the print statement (after estimated_time_per_backtest)
 
             # constant params:
             # 90 day expected return, sell -> buy -> highest leverage
-            trading_quantity_per_leverage_factor=2.5,
             abs_potential_threshold_steps=(.0025, .04, .1),
             sell_opposite_direction_if_no_cash=True,
             sell_all_opposite_products_if_no_cash=True,
@@ -690,7 +692,7 @@ def check_schedule_diary():
 
                     # status message:
                     weekday_dict = {0: "monday", 1: "tuesday", 2: "wednesday", 3: "thursday", 4: "friday", 5: "saturday", 6: "sunday"}
-                    info_statement = f"Function {func_key} was last executed on day {last_execution[0]} ({weekday_dict[last_execution[1]]}) at {last_execution[2]}h{last_execution[3]}min."
+                    info_statement = f"Function {func_key} was last executed on the {last_execution[0]}. ({weekday_dict[last_execution[1]]}) at {last_execution[2]}h{last_execution[3]}min."
                     check_statement = "This is within the schedule." if not missed_exec else "*Hence, at least one scheduled execution was missed. Manual re-execution is recommended!*"
                     chatter(info_statement + "\n" + check_statement)
 
