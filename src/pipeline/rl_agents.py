@@ -164,6 +164,7 @@ class MultiProductAgent:
         # weight by tendency:
         avg_tendency = np.mean(tendency_estimates) if tendency_estimates is not None and len(tendency_estimates) != 0 else 0
 
+        # todo: can this be sped up? e.g. threshold sorting -> slicing -> selecting largest element
         # select action based on thresholds:
         for ind, lower in enumerate(self.lower_thresholds):
             # derive upper threshold (or set to inf if last ind)
