@@ -637,7 +637,7 @@ def update_env_predictors() -> None:
     chatter(describe_env_predictors())
     chatter("Done!")
 
-
+# todo: include schedule_diary_manager functionality
 def log_execution(function):
     """
     Updates the schedule entry line in the diary file for the specified function name.
@@ -655,9 +655,9 @@ def log_execution(function):
     """
     # current time and function name:
     now = datetime.now()
-    day_of_month, weekday, hour, minute = now.day, now.weekday(), now.hour, now.minute
-    function_name = function.__name__
+    schedule_diary_manager.change_entry(function.__name__, [now.day, now.weekday(), now.hour, now.minute])
 
+    """
     # assemble new line:
     new_line = f"{function_name} --- {day_of_month}, {weekday}, {hour}, {minute}\n"
     updated = False
@@ -680,6 +680,7 @@ def log_execution(function):
     # Write the updated lines back to the file
     with open(SCHEDULE_DIARY_FILE, 'w') as f:
         f.writelines(lines)
+    """
 
 
 ###################### WORKFLOW DEFINITION ######################
@@ -692,6 +693,7 @@ function_schedule = {predict_and_trade: [None, [0, 1, 2, 3, 4], 16, 25],  # 20 m
                      tell_time: [None, None, [13, 15] , [15, 45]],
                      }
 
+# todo: include schedule_diary_manager functionality
 def check_schedule_diary(execute_missed_functions: bool = True, verbose: bool = False):
     """
     Compares scheduling information in a diary file to a provided dictionary.
@@ -703,6 +705,61 @@ def check_schedule_diary(execute_missed_functions: bool = True, verbose: bool = 
     """
     chatter("Will check whether all functions have been executed according to schedule...")
     functions_to_repeat = []
+
+    # compare all scheduled files:
+    for function, expected_schedule in function_schedule.items():
+        function_name = function.__name__
+        if function_name in schedule_diary_manager.settings_dict:
+            # last entered execution:
+            last_execution = schedule_diary_manager.get_as_type(function_name, 'float_list')
+
+            # current time for comparison:
+            now = datetime.now()
+            current_times = now.day, now.weekday(), now.hour, now.minute
+
+            # start for by assuming there's no missed execution:
+            missed_exec = False
+
+            for ind, (last, expected, current) in enumerate(zip(last_execution, expected_schedule, current_times)):
+                if missed_exec: continue  # if one time-unit already points out that execution was missed, that's sufficient
+
+                # if scheduled for multiple timepoints, pick either:
+                if isinstance(expected, list):
+                    if current in expected:  # 1) the current or
+                        expected = current
+                    else:  # 2) the latest before
+                        smaller_scheduled_times = [i for i in expected if i < current]
+                        if len(smaller_scheduled_times) == 0: continue  # no smaller expected times (execution is yet to come!)
+                        expected = smaller_scheduled_times[-1]  # last scheduled time
+
+                if expected is None:  # if regular execution is desired:
+                    expected = current - 1  # then the previous timestamp equals the expected execution
+
+                missed_exec = (last < expected < current)
+                # expected is in the past, and last is even before -> missed
+
+            # status message:
+            weekday_dict = {0: "monday", 1: "tuesday", 2: "wednesday", 3: "thursday", 4: "friday", 5: "saturday", 6: "sunday"}
+            if verbose or missed_exec: chatter(f"Function {function_name} was last executed on the {int(last_execution[0])}. ({weekday_dict[last_execution[1]]}) at {last_execution[2]}h{last_execution[3]}min.")
+
+        else:  # if no dict entry, then execution was surely missed
+            missed_exec = True
+            if verbose: chatter(f"No last execution was logged for {function_name}.")
+
+
+        # more status messages:
+        check_statement = "This is within the schedule." if not missed_exec else f"*Hence, at least one scheduled execution was missed. {'Will be re-executed afterwards.' if execute_missed_functions else 'Manual re-execution is recommended!'}*"
+        if verbose or missed_exec: chatter(check_statement)
+
+        # prepare functions for execution:
+        if missed_exec: functions_to_repeat.append(function)
+
+    # repeat missed executions:
+    if execute_missed_functions:
+        for func in functions_to_repeat:
+            func(); log_execution(func)
+
+    """ old loop:
     # Open the diary file in read mode and process line by line
     with open(SCHEDULE_DIARY_FILE, 'r') as f:
         for line in f:
@@ -713,44 +770,8 @@ def check_schedule_diary(execute_missed_functions: bool = True, verbose: bool = 
                 if line.startswith(function_name):
                     # Split the line on ' --- ' to separate key and value, and type-convert the values:
                     last_execution = [int(str) for str in line.split(' --- ')[1].split(', ')]
+    """
 
-                    # current time for comparison:
-                    now = datetime.now()
-                    current_times = now.day, now.weekday(), now.hour, now.minute
-
-                    # start for by assuming there's no missed execution:
-                    missed_exec = False
-                    for last, expected, current in zip(last_execution, expected_schedule, current_times):
-                        if missed_exec: continue  # if one time-unit already points out that execution was missed, that's sufficient
-                        # if scheduled for multiple timepoints, pick either
-                        if isinstance(expected, list):
-                            if current in expected:  # the current or
-                                expected = current
-                            else:  # the latest before
-                                smaller_scheduled_times = [i for i in expected if i < current]
-                                expected = smaller_scheduled_times[-1]  # last scheduled time
-
-                        if expected is None:  # if regular execution is desired:
-                            expected = current - 1  # then the previous timestamp should be the execution
-
-                        missed_exec = (last < expected < current)
-                        # if wasn't executed in expected time unit and current time unit alreaddy surpassed the expected
-                        # then execution was missed. If that time-unit is not specified, skip (or set to False) and
-                        # check the specified ones
-
-                    # status message:
-                    weekday_dict = {0: "monday", 1: "tuesday", 2: "wednesday", 3: "thursday", 4: "friday", 5: "saturday", 6: "sunday"}
-                    info_statement = f"Function {function_name} was last executed on the {last_execution[0]}. ({weekday_dict[last_execution[1]]}) at {last_execution[2]}h{last_execution[3]}min."
-                    check_statement = "This is within the schedule." if not missed_exec else f"*Hence, at least one scheduled execution was missed. {'Will be re-executed afterwards.' if execute_missed_functions else 'Manual re-execution is recommended!'}*"
-                    if verbose or missed_exec: chatter(info_statement + "\n" + check_statement)
-
-                    # prepare functions for execution:
-                    if missed_exec: functions_to_repeat.append(function)
-
-    # repeat missed executions:
-    if execute_missed_functions:
-        for function in functions_to_repeat:
-            function(); log_execution(function); chatter('Done!')
 
 request_map = {
     "describe portfolio": describe_portfolio,
