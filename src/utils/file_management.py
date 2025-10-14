@@ -123,7 +123,7 @@ class TxtConfig:
         with open(self.txt_file_path, "w") as file:
             for key, value in new_dict.items():
                 if isinstance(value, list):
-                    value = ", ".join(value)  # list formatting (can be retrieved via get_as_type)
+                    value = ", ".join([str(e) for e in value])  # list formatting (can be retrieved via get_as_type)
                 file.write(f"{str(key)} --- {str(value)}\n")
 
     def get_as_type(self, key, value_type: Literal["int", "float", "float_list", "str_list", "list", "bool", "str"]):
