@@ -413,6 +413,7 @@ class RLTradingEnv(gym.Env):
                                         )
             portfolio_exposure = portfolio_exposure.item() if (portfolio_exposure is not np.nan) and (
                         portfolio_exposure != 0) else 0.0
+
         else: portfolio_exposure = None
 
         # get current observation:
@@ -422,7 +423,7 @@ class RLTradingEnv(gym.Env):
         if isinstance(reward, (np.float32, np.float64, np.ndarray)):
             formatted_reward = reward.item()  # safely get a Python float
         else: formatted_reward = reward
-        formatted_reward = round(formatted_reward, 2) if (formatted_reward is not np.nan) and (formatted_reward != 0) else 0,
+        formatted_reward = round(formatted_reward, 2) if (formatted_reward is not np.nan) and (formatted_reward != 0) else 0
 
         # todo: if tendencies included in observations, include such here
         # construct info dictionary:
@@ -545,7 +546,12 @@ class RLTradingEnv(gym.Env):
         if type == 'Sell':
             # select all products with leverages inside span and higher:
             # todo: reflect whether all products with higher leverages should remain, or whether only inside span should be sold
-            open_candidates = self.open_positions.loc[self.open_positions.Direction == direction]
+            try:
+                open_candidates = self.open_positions.loc[self.open_positions.Direction == direction]
+            except KeyError:  # some data couldn't be fetched
+                print(f"Problem while calculating open positions for {direction} at {self.current_step_timestamp}. Continuing.")
+                return   # aka. no product found
+
             leverage_candidates = open_candidates.loc[
                 (open_candidates.Leverage >= leverage_span[0])]  # & open_candidates.Leverages <= leverage_span[1]]
             if len(leverage_candidates) == 0: return  # no product found
@@ -1018,17 +1024,37 @@ class RLTradingEnv(gym.Env):
     @property
     def open_positions(self) -> pd.DataFrame:
         """ Dataframe with all open positions' shares, leverages, prices and directions. """
+        if hasattr(self, '_cached_open_positions'):  # use cached open positions
+            if self._cached_open_positions_ts == self.current_step_timestamp:
+                return self._cached_open_positions
+
         open_isins = list(self.shares_per_product[self.shares_per_product != 0].index)
         if len(open_isins) == 0:
             data_dict = {'Shares': None, 'Leverage': None, 'Price': None, 'Direction': None, '% Portfolio': None}
         else:
-            data_dict = {'Shares': self.shares_per_product[open_isins],
-                         'Leverage': self.product_set.leverage_frame.loc[self.current_step_timestamp, open_isins],
-                         'Price': self.product_set.price_frame.loc[self.current_step_timestamp, open_isins],
-                         'Direction': [self.product_set.by_isin[isin].direction for isin in open_isins],
-                         '% Portfolio': self.shares_per_product[open_isins] * self.product_set.price_frame.loc[
-                             self.current_step_timestamp, open_isins] / self.current_balance * 100,
-                         }
+            data_dict = {}  # initialise data dict (this happens separately to time the value composition below)
+            data_dict['Shares'] = self.shares_per_product[open_isins]
+
+            # previous (VERY EXPENSIVE, ~100ms): data_dict['Leverage'] = self.product_set.leverage_frame.loc[self.current_step_timestamp, open_isins]
+            # now (QUITE FAST, ~7ms):
+            leverage_list = []  # initialise separately, to catch errors within for loop
+            for isin in open_isins:
+                try:
+                    leverage_list.append(self.product_set.by_isin[isin].leverage_series.loc[self.current_step_timestamp])
+                except KeyError:  # time point not found
+                    print(f"Error with leverage calculation for {isin} at {self.current_step_timestamp}!")
+                    leverage_list.append(0.0)
+            data_dict['Leverage'] = leverage_list
+
+            data_dict['Price'] = self.product_set.price_frame.loc[self.current_step_timestamp, open_isins]
+            data_dict['Direction'] = [self.product_set.by_isin[isin].direction for isin in open_isins]
+            data_dict['% Portfolio'] = self.shares_per_product[open_isins] * self.product_set.price_frame.loc[
+                             self.current_step_timestamp, open_isins] / self.current_balance * 100
+
+        # cache result:
+        self._cached_open_positions = pd.DataFrame(data_dict, index=open_isins)
+        self._cached_open_positions_ts = self.current_step_timestamp
+
         return pd.DataFrame(index=open_isins,
                             data=data_dict)
 
@@ -1037,7 +1063,7 @@ class RLTradingEnv(gym.Env):
                          mute_environment: bool = True,
                          print_statistics: bool = True,
                          reset_environment: bool = True,
-                         track_portfolio_exposure_every: int = 15,
+                         track_portfolio_exposure_every: int = 45,
                          save_log_directory: str = None,
                          plot_results: bool = True,
                          performance_time_unit: Literal['p.a.', 'p.m.'] = 'p.m.',
@@ -1090,16 +1116,22 @@ class RLTradingEnv(gym.Env):
         if mute_environment: self.verbose = False
 
         ### iterate through all steps of environment:
-        log = pd.DataFrame()  # initialise log frame
+        log_list = []  # initialise log list
+        print('Stepping environment along complete provided price data...')
         for ind in tqdm(range(self.current_step, self.total_steps)):
             action, _ = agent.predict(obs)  # infer action
+
             if isinstance(action, np.ndarray): action = action.item()  # stable_baselines DQN returns np.array
 
             obs, _, done, truncated, info = self.step(action, track_portfolio_exposure=(
                         ind % track_portfolio_exposure_every == 0))  # retrieve new observation and info
 
             if done or truncated: break  # check whether episode is finished
-            log = pd.concat([log, pd.DataFrame(info, index=[info['Step']])])  # log info
+            log_list.append(info)
+
+        # convert log_list to dataframe:
+        log = pd.DataFrame(log_list)
+        log.set_index('Step', inplace=True)
 
         # datetime-index for column concatenation and coherent structure:
         log['Time'] = pd.to_datetime(log['Time'])
@@ -1439,6 +1471,7 @@ def env_parametrisation_loop(env_price_sampling_rate_minutes: int,
                              print_progress: bool = True,
                              backtest_database_dir: Union[str, Path] = None,
                              include_constant_params_in_output: bool = True,
+                             track_portfolio_exposure_every: int = 100,
                              **param_grid_and_constants):
     """
     Executes a parameterization loop over varying and constant parameters for environment testing,
@@ -1546,7 +1579,7 @@ def env_parametrisation_loop(env_price_sampling_rate_minutes: int,
 
             # Settings and losses
             _, _, metric_tuple = temp_env.run_env_backtest(temp_agent, mute_environment=True, reset_environment=True,
-                                                           track_portfolio_exposure_every=100000,
+                                                           track_portfolio_exposure_every=track_portfolio_exposure_every,
                                                            plot_results=False)
         except (ValueError, AttributeError) as e:
             print("Caught an exception:", e)
@@ -1567,15 +1600,19 @@ def env_parametrisation_loop(env_price_sampling_rate_minutes: int,
     # update backtest_database_dir:
     if backtest_database_dir is not None:
         results['date'] = datetime.today().strftime('%Y-%m-%d')
-        try:  # try concatenation
+
+        try:  # concatenation
             previous_frame = pd.read_csv(filemgmt.most_recent_file(backtest_database_dir))
             new_frame = pd.concat([previous_frame, results], ignore_index=True)
         except ValueError:  # otherwise just save result
             new_frame = results
-        try:
+
+        try:  # duplicate removal
             new_frame.drop_duplicates(inplace=True)
         except TypeError as err:
             print("Error during duplicate removal:", err)
+
+        # save:
         new_frame.to_csv(backtest_database_dir / filemgmt.file_title("Backtest Database", ".csv"), index=False)
 
     return results
