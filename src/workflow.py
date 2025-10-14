@@ -50,18 +50,24 @@ TRAINING_LOGS = ROOT / "output" / "rl_training_logs"
 PREDICTION_PLOTS = ROOT / "output" / "prediction_plots"
 
 PRIVATE_FILES = ROOT / "private"
-AV_API_KEY_FILE = PRIVATE_FILES / "Alpha Vantage API Key.txt"
+# define config files:
 SCHEDULE_DIARY_FILE = PRIVATE_FILES / "schedule_diary.txt"
+ENV_CONFIGURATION_FILE = PRIVATE_FILES / "env_configuration.txt"
+CHATBOT_ENV_FILE = PRIVATE_FILES / "chatbot.env"
+# read in config files:
+schedule_diary_manager = filemgmt.TxtConfig(SCHEDULE_DIARY_FILE)
+env_config_manager = filemgmt.TxtConfig(ENV_CONFIGURATION_FILE)
+if not load_dotenv(CHATBOT_ENV_FILE):
+    raise ValueError("Failed to load .env file")
+# define and read key files:
+AV_API_KEY_FILE = PRIVATE_FILES / "Alpha Vantage API Key.txt"
 with open(AV_API_KEY_FILE) as file: AV_API_KEY = file.read()
-
 WIKIFOLIO_KEY_FILE = PRIVATE_FILES / "Wikifolio key.txt"
 with open(WIKIFOLIO_KEY_FILE) as file: WIKIFOLIO_USER_KEY = file.read().split('\n')
 
-CHATBOT_ENV_FILE = PRIVATE_FILES / "chatbot.env"
-if not load_dotenv(CHATBOT_ENV_FILE): raise ValueError("Failed to load .env file")
-
 
 ###################### INITIALISATION ######################
+# initialise manager instances:
 data_manager = StockPriceDataManager(ticker_symbol='DAX',
                                     download_dir=DOWNLOADED_PRICES,
                                     interpolated_files_dir=INTERPOLATED_PRICES,
@@ -80,6 +86,8 @@ pred_manager = PredictorManager(data_manager=data_manager, initialisation_dir=SA
                                 not_older_than_n_days=15,  # only recently fine-tuned models
                                 )
 
+
+# inialise portfolios (certificate sets):
 portfolio = KOCertificateSet.load_from_csv(
     file_path=filemgmt.most_recent_file(SAVED_PORTFOLIOS, ".csv", ["Scraped"]),
     underlying_price_series=data_manager.non_etf_env_interp_prices, )
@@ -88,12 +96,14 @@ backtest_portfolio = KOCertificateSet.load_from_csv(
         file_path=filemgmt.most_recent_file(SAVED_PORTFOLIOS, ".csv", ["Artificial"]),
         underlying_price_series=data_manager.non_etf_env_interp_prices, )
 
+
+# initialise environment:
 env = RLTradingEnv(price_series=data_manager.env_interp_prices,
                    price_sampling_rate_minutes=data_manager.env_sampling_rate_minutes,
-                   predictor_instances=pred_manager.get_predictors_by_type_sorted(architecture='LSTM', preset_type='c2', return_instances=True,
-                                                                                  k_best=1) + pred_manager.get_predictors_by_type_sorted(architecture='LSTM', preset_type='d2', return_instances=True,
-                                                                                                                                         k_best=1) + pred_manager.get_predictors_by_type_sorted(architecture='LSTM', preset_type='d3', return_instances=True,
-                                                                                                                                                                                                k_best=1),
+                   predictor_instances=[pred_manager.get_predictors_by_type_sorted(architecture='LSTM',
+                                                                   preset_type=p_type,
+                                                                   return_instances=True,
+                                                                   k_best=1)[0] for p_type in env_config_manager.get_as_type('predictors_to_include', 'list')],
                    product_set=portfolio,
                    trading_quantity_per_leverage_factor=2.5,
                    sell_opposite_direction_if_no_cash=True, sell_all_opposite_products_if_no_cash=True,
@@ -104,7 +114,7 @@ env = RLTradingEnv(price_series=data_manager.env_interp_prices,
 agent = MultiProductAgent(observation_types=env.observation_types,
                           observation_horizons_minute=env.observation_horizons_minutes,
                           n_leverage_categories=len(env.leverage_categories),
-                          abs_potential_threshold_steps=(.0025, .04, .1),  # (.04, .15, .7)
+                          abs_potential_threshold_steps=env_config_manager.get_as_type('potential_steps', 'float_list'),  # (.04, .15, .7)
                           include_open_leverage_category=env.include_open_leverage_category,
                           potential_treshold_horizon_days=env.potential_horizon_days,
                           )
@@ -331,12 +341,17 @@ def describe_best_backtests(criterion: Literal['Mean', 'Median', 'SharpeRatio'] 
         output_str += "\n"
     return output_str
 
+def describe_predictors_to_include():
+    intro = "Currently the best instances of the following predictor-types\n\n" + str(env_config_manager.get_as_type('predictors_to_include', 'list')) + "\n\nwill be included, if calling 'do update environment predictors'!"
+    recommendation = "Use the 'do toggle PREDICTOR_TYPE' commands to change this."
+    return intro + '\n\n' + recommendation
+
 
 ###################### WORKFLOW FUNCTIONS ######################
 # SATURDAYS
 @timed_callback_decorator(callback=chatter)
 @retry_decorator(on_error_callback=chatter)
-def fine_tune_predictors(patience_tuple: [int] = (10, 20), presets_to_include: [str] = ("c1", "c2", "d1", "d2", "d3")):
+def fine_tune_predictors(patience_tuple: [int] = (10, 20), presets_to_include: [str] = ("b1", "b2", "c1", "c2", "d1", "d2", "d3")):
     # reinitialise predictor manager with larger not_older_than_n_days
     temp_pred_manager = PredictorManager(data_manager=data_manager, initialisation_dir=SAVED_MODELS, recursive=True,
                                          not_older_than_n_days=60,  # models of last two month
@@ -403,7 +418,7 @@ def back_test_predictors(presets_to_consider: [str] = ("b1", "b2", "c1", "c2", "
                 try:
                     list_entry.append(pred_manager.get_predictors_by_type_sorted(architecture=arch, preset_type=preset,
                                                                                  return_instances=True, k_best=1)[0])
-                except IndexError:
+                except (IndexError, ValueError):
                     print(f"No {arch} predictor found for {preset} in {comb}. Skipping.")
             if len(list_entry) > 0: predictor_list.append(list_entry)
 
@@ -424,7 +439,7 @@ def back_test_predictors(presets_to_consider: [str] = ("b1", "b2", "c1", "c2", "
 
             # constant params:
             # 90 day expected return, sell -> buy -> highest leverage
-            abs_potential_threshold_steps=(.0025, .04, .1),
+            abs_potential_threshold_steps=env_config_manager.get_as_type('potential_steps', 'float_list'),  #(.0025, .04, .1),
             sell_opposite_direction_if_no_cash=True,
             sell_all_opposite_products_if_no_cash=True,
             include_open_leverage_category=False,
@@ -565,14 +580,46 @@ def tell_time():
     chatter(f"It is {datetime.now().hour}.{datetime.now().minute} and this is a test")
 
 
-def update_env_predictors(types_to_include=("c2", "d2", "d3")) -> None:
+# change predictors to be included:
+def toggle_b1_predictor():
+    current_presets = env_config_manager.get_as_type('predictors_to_include', 'list')
+    if 'b1' in current_presets: current_presets.remove('b1'); chatter("Will not be included anymore.")
+    else: current_presets.append('b1'); chatter("Will now be included.")
+    env_config_manager.change_entry('predictors_to_include', current_presets)
+def toggle_b2_predictor():
+    current_presets = env_config_manager.get_as_type('predictors_to_include', 'list')
+    if 'b2' in current_presets: current_presets.remove('b2'); chatter("Will not be included anymore.")
+    else: current_presets.append('b2'); chatter("Will now be included.")
+    env_config_manager.change_entry('predictors_to_include', current_presets)
+def toggle_c1_predictor():
+    current_presets = env_config_manager.get_as_type('predictors_to_include', 'list')
+    if 'c1' in current_presets: current_presets.remove('c1'); chatter("Will not be included anymore.")
+    else: current_presets.append('c1'); chatter("Will now be included.")
+    env_config_manager.change_entry('predictors_to_include', current_presets)
+def toggle_c2_predictor():
+    current_presets = env_config_manager.get_as_type('predictors_to_include', 'list')
+    if 'c2' in current_presets: current_presets.remove('c2'); chatter("Will not be included anymore.")
+    else: current_presets.append('c2'); chatter("Will now be included.")
+    env_config_manager.change_entry('predictors_to_include', current_presets)
+def toggle_d1_predictor():
+    current_presets = env_config_manager.get_as_type('predictors_to_include', 'list')
+    if 'd1' in current_presets: current_presets.remove('d1'); chatter("Will not be included anymore.")
+    else: current_presets.append('d1'); chatter("Will now be included.")
+    env_config_manager.change_entry('predictors_to_include', current_presets)
+def toggle_d2_predictor():
+    current_presets = env_config_manager.get_as_type('predictors_to_include', 'list')
+    if 'd2' in current_presets: current_presets.remove('d2'); chatter("Will not be included anymore.")
+    else: current_presets.append('d2'); chatter("Will now be included.")
+    env_config_manager.change_entry('predictors_to_include', current_presets)
+def toggle_d3_predictor():
+    current_presets = env_config_manager.get_as_type('predictors_to_include', 'list')
+    if 'd3' in current_presets: current_presets.remove('d3'); chatter("Will not be included anymore.")
+    else: current_presets.append('d3'); chatter("Will now be included.")
+    env_config_manager.change_entry('predictors_to_include', current_presets)
+
+def update_env_predictors() -> None:
     """
     Updates the environment's predictors based on the specified types.
-
-    Parameters
-    ----------
-    types_to_include : tuple of str, optional
-        A tuple of predictor types to include (e.g., "c2", "d2", "d3"). Default is ("c2", "d2", "d3").
     """
     # status message:
     chatter("Updating env predictors from:")
@@ -582,7 +629,7 @@ def update_env_predictors(types_to_include=("c2", "d2", "d3")) -> None:
     preds_to_include = [pred_manager.get_predictors_by_type_sorted(architecture='LSTM',
                                                                    preset_type=p_type,
                                                                    return_instances=True,
-                                                                   k_best=1)[0] for p_type in types_to_include]
+                                                                   k_best=1)[0] for p_type in env_config_manager.get_as_type('predictors_to_include', 'list')]
     env.predictor_instances = preds_to_include
 
     # status message:
@@ -645,7 +692,7 @@ function_schedule = {predict_and_trade: [None, [0, 1, 2, 3, 4], 16, 25],  # 20 m
                      tell_time: [None, None, [13, 15] , [15, 45]],
                      }
 
-def check_schedule_diary():
+def check_schedule_diary(execute_missed_functions: bool = True, verbose: bool = False):
     """
     Compares scheduling information in a diary file to a provided dictionary.
 
@@ -654,15 +701,16 @@ def check_schedule_diary():
     Expects lines in the diary file to be formatted as: '<key> --- <schedule>'
     Only lines starting with keys in `function_schedule` will be compared.
     """
-    results = {}
+    chatter("Will check whether all functions have been executed according to schedule...")
+    functions_to_repeat = []
     # Open the diary file in read mode and process line by line
     with open(SCHEDULE_DIARY_FILE, 'r') as f:
         for line in f:
             line = line.strip()
             # Check each function name in the dictionary
             for function, expected_schedule in function_schedule.items():
-                func_key = function.__name__
-                if line.startswith(func_key):
+                function_name = function.__name__
+                if line.startswith(function_name):
                     # Split the line on ' --- ' to separate key and value, and type-convert the values:
                     last_execution = [int(str) for str in line.split(' --- ')[1].split(', ')]
 
@@ -692,9 +740,17 @@ def check_schedule_diary():
 
                     # status message:
                     weekday_dict = {0: "monday", 1: "tuesday", 2: "wednesday", 3: "thursday", 4: "friday", 5: "saturday", 6: "sunday"}
-                    info_statement = f"Function {func_key} was last executed on the {last_execution[0]}. ({weekday_dict[last_execution[1]]}) at {last_execution[2]}h{last_execution[3]}min."
-                    check_statement = "This is within the schedule." if not missed_exec else "*Hence, at least one scheduled execution was missed. Manual re-execution is recommended!*"
-                    chatter(info_statement + "\n" + check_statement)
+                    info_statement = f"Function {function_name} was last executed on the {last_execution[0]}. ({weekday_dict[last_execution[1]]}) at {last_execution[2]}h{last_execution[3]}min."
+                    check_statement = "This is within the schedule." if not missed_exec else f"*Hence, at least one scheduled execution was missed. {'Will be re-executed afterwards.' if execute_missed_functions else 'Manual re-execution is recommended!'}*"
+                    if verbose or missed_exec: chatter(info_statement + "\n" + check_statement)
+
+                    # prepare functions for execution:
+                    if missed_exec: functions_to_repeat.append(function)
+
+    # repeat missed executions:
+    if execute_missed_functions:
+        for function in functions_to_repeat:
+            function(); log_execution(function); chatter('Done!')
 
 request_map = {
     "describe portfolio": describe_portfolio,
@@ -705,14 +761,22 @@ request_map = {
     "describe predictor presets": describe_predictor_presets,
     "describe best predictors": describe_best_predictors,
     "describe best backtests": describe_best_backtests,
+    "describe predictors to include": describe_predictors_to_include,
     "do update environment": update_env_from_scrape,
     "do update environment predictors": update_env_predictors,
-    "do step environment": predict_and_trade,
-    "do update portfolio": update_portfolio,
-    "do finetuning": fine_tune_predictors,
-    "do backtesting": back_test_predictors,
-    "do parametrisation": parametrize_predictors,
+    # "do step environment": predict_and_trade,
+    # "do update portfolio": update_portfolio,
+    #"do finetuning": fine_tune_predictors,  # shadow out computationally expensive steps that are also scheduled
+    #"do backtesting": back_test_predictors,
+    #"do parametrisation": parametrize_predictors,
     "do check schedule": check_schedule_diary,
+    "do toggle b1": toggle_b1_predictor,
+    "do toggle b2": toggle_b2_predictor,
+    "do toggle c1": toggle_c1_predictor,
+    "do toggle c2": toggle_c2_predictor,
+    "do toggle d1": toggle_d1_predictor,
+    "do toggle d2": toggle_d2_predictor,
+    "do toggle d3": toggle_d3_predictor,
 }
 
 ###################### PROCESS DEFINITIONS ######################
