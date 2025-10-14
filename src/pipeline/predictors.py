@@ -1965,6 +1965,7 @@ class PredictorManager:
             if (not architecture or predictor['architecture'] == architecture)
                and (not preset_type or predictor['preset_type'] == preset_type.lower())
         ]
+        if len(filtered) == 0: return []
         # Sort predictors by validation hit rate in descending order
         pred_dict_list = sorted(filtered, key=lambda x: x["validation_hit_rate"], reverse=True)
         if k_best is not None: pred_dict_list = pred_dict_list[:k_best]
@@ -2064,9 +2065,13 @@ class PredictorManager:
             print("\nFine-tuning best predictor for architecture:\t\t", architecture, "\tand preset type:\t\t", preset,
                   "")
             # instantiate predictor:
-            instance = \
-                self.get_predictors_by_type_sorted(architecture=architecture, preset_type=preset, return_instances=True,
-                                                   k_best=1, )[0]
+            try:
+                instance = \
+                    self.get_predictors_by_type_sorted(architecture=architecture, preset_type=preset, return_instances=True,
+                                                       k_best=1, )[0]
+            except (IndexError, ValueError):
+                print('No predictor found!')
+                continue
 
             # set training parameters
             instance.model_save_directory = finetune_working_directory
