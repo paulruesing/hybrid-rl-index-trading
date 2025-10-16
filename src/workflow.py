@@ -685,7 +685,7 @@ def log_execution(function):
 
 ###################### WORKFLOW DEFINITION ######################
 # day (of month), weekday, hour, minute
-function_schedule = {predict_and_trade: [None, [0, 1, 2, 3, 4], 16, 25],  # 20 minutes offset, because 15-min delayed prices and +5min to prevent errors
+function_schedule = {predict_and_trade: [None, [0, 1, 2, 3, 4], 16, 30],  # 20 minutes offset, because 15-min delayed prices and +5min to prevent errors
                      update_portfolio: [None,[0, 1, 2, 3, 4], 16, 0],  # update portfolio details to prepare prediction
                      fine_tune_predictors: [None, 5, 13, 0],
                      back_test_predictors: [None, 6, 13, 0],
@@ -693,7 +693,6 @@ function_schedule = {predict_and_trade: [None, [0, 1, 2, 3, 4], 16, 25],  # 20 m
                      tell_time: [None, None, [13, 15] , [15, 45]],
                      }
 
-# todo: include schedule_diary_manager functionality
 def check_schedule_diary(execute_missed_functions: bool = True, verbose: bool = False):
     """
     Compares scheduling information in a diary file to a provided dictionary.
