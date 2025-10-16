@@ -18,8 +18,7 @@ def timed_callback_decorator(callback: callable = print, interval_minutes=5):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            # Variables to track time and stop the callback thread
-            start_time = time.time()
+            # Variable to stop the callback thread
             stop_event = Event()
 
             def report_status():
@@ -69,7 +68,7 @@ def timed_callback_decorator(callback: callable = print, interval_minutes=5):
 
 def retry_decorator(exceptions=(ValueError, AttributeError, IndexError, WebDriverException, TypeError, KeyError),
                     on_error_callback: callable = print,
-                    retries: int = 1, delay: int = 1):
+                    retries: int = 2, delay: int = 1):
     """
     Creates a decorator to automatically retry a function upon encountering specified exceptions.
 
