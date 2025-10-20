@@ -1,6 +1,7 @@
 import multiprocessing
 from ctypes import c_char
 from datetime import datetime
+from src.utils.file_management import TxtConfig
 
 
 class RobustEventManager:
@@ -172,6 +173,70 @@ def check_schedule(function_schedule: dict[callable, list[int]], was_executed: l
 
     # return all working memory and func to be executed:
     return (func_to_be_executed is not None), func_to_be_executed, was_executed
+
+
+def check_schedule_diary(schedule_diary_manager: TxtConfig, function_schedule: dict, verbose: bool = False, callback=print):
+    # compare all scheduled files:
+    temp_dict = {}
+    for function, expected_schedule in function_schedule.items():
+        function_name = function.__name__
+        if function_name in schedule_diary_manager.settings_dict:
+            # last entered execution:
+            last_execution = schedule_diary_manager.get_as_type(function_name, 'float_list')
+
+            # current time for comparison:
+            now = datetime.now()
+            current_times = now.day, now.weekday(), now.hour, now.minute
+
+            # start for by assuming there's no missed execution:
+            missed_exec = False
+
+            for ind, (last, expected, current) in enumerate(zip(last_execution, expected_schedule, current_times)):
+                # if None, then either:
+                if expected is None:
+                    if (ind == 0) or (
+                            expected_schedule[ind - 1] is None):  # if first specification or if previous was also None
+                        # 1) regular execution is desired and
+                        expected = current - 1  # the previous timestamp equals the expected execution
+                    else:  # or, 2) the timestep just doesn't matter
+                        continue
+
+                # if scheduled for multiple timepoints, pick either:
+                if isinstance(expected, list):
+                    if current in expected:  # 1) the current or
+                        expected = current
+                    else:  # 2) the latest before
+                        smaller_scheduled_times = [i for i in expected if i <= current]
+                        if len(
+                            smaller_scheduled_times) == 0: continue  # no smaller expected times (execution is yet to come!)
+                        expected = smaller_scheduled_times[-1]  # last scheduled time
+
+                # check condition:
+                if current > expected != last:  # if the time-unit is passed and expected doesn't equal last, then we know the answer, either:
+                    if last < expected:  # 1) last is even before: one was missed! or
+                        missed_exec = True;
+                        break
+                    else:  # 2) last is after expected, then the execution happened correctly.
+                        break
+
+            # status message:
+            weekday_dict = {0: "monday", 1: "tuesday", 2: "wednesday", 3: "thursday", 4: "friday", 5: "saturday",
+                            6: "sunday"}
+            if verbose or missed_exec: callback(
+                f"Function {function_name} was last executed on the {int(last_execution[0])}. ({weekday_dict[last_execution[1]]}) at {last_execution[2]}h{last_execution[3]}min.")
+
+        else:  # if no dict entry, then execution was surely missed
+            missed_exec = True
+            if verbose: callback(f"No last execution was logged for {function_name}.")
+
+        # more status messages:
+        check_statement = "This is within the schedule." if not missed_exec else f"*Hence, at least one scheduled execution was missed.*"
+        if verbose or missed_exec: callback(check_statement)
+
+        # prepare return dict
+        temp_dict[function] = missed_exec
+
+    return temp_dict
 
 
 def verify_schedule(function_schedule: dict[callable, list[int]]) -> None:
