@@ -8,7 +8,7 @@ from src.utils.function_decorators import retry_decorator, timed_callback_decora
 import src.pipeline.web_interaction as webinteraction
 import src.utils.file_management as filemgmt
 from src.utils.chatbot_app import create_app
-from src.pipeline.processing_tools import RobustEventManager, FortifiedSharedMemory, check_schedule, verify_schedule, check_request_mapping
+from src.pipeline.processing_tools import RobustEventManager, FortifiedSharedMemory, check_schedule, verify_schedule, check_request_mapping, check_schedule_diary
 
 from datetime import datetime
 import time
@@ -384,6 +384,7 @@ def fine_tune_predictors(patience_tuple: [int] = (10, 20), presets_to_include: [
 def parametrize_predictors():
     pass
 
+
 @timed_callback_decorator(callback=chatter)
 @retry_decorator(on_error_callback=chatter)
 def back_test_predictors(presets_to_consider: [str] = ("b1", "b2", "c1", "c2", "d1", "d2", "d3"),
@@ -439,7 +440,7 @@ def back_test_predictors(presets_to_consider: [str] = ("b1", "b2", "c1", "c2", "
 
             # constant params:
             # 90 day expected return, sell -> buy -> highest leverage
-            abs_potential_threshold_steps=env_config_manager.get_as_type('potential_steps', 'float_list'),  #(.0025, .04, .1),
+            abs_potential_threshold_steps=tuple(env_config_manager.get_as_type('potential_steps', 'float_list')),  #(.0025, .04, .1),
             sell_opposite_direction_if_no_cash=True,
             sell_all_opposite_products_if_no_cash=True,
             include_open_leverage_category=False,
@@ -448,6 +449,7 @@ def back_test_predictors(presets_to_consider: [str] = ("b1", "b2", "c1", "c2", "
 
     chatter("Back-testing finished!")
     chatter(describe_best_backtests(not_older_than=pd.Timestamp.now() - pd.Timedelta(days=2)))
+
 
 @timed_callback_decorator(callback=chatter)
 @retry_decorator(on_error_callback=chatter)
@@ -617,6 +619,7 @@ def toggle_d3_predictor():
     else: current_presets.append('d3'); chatter("Will now be included.")
     env_config_manager.change_entry('predictors_to_include', current_presets)
 
+
 def update_env_predictors() -> None:
     """
     Updates the environment's predictors based on the specified types.
@@ -637,7 +640,7 @@ def update_env_predictors() -> None:
     chatter(describe_env_predictors())
     chatter("Done!")
 
-# todo: include schedule_diary_manager functionality
+
 def log_execution(function):
     """
     Updates the schedule entry line in the diary file for the specified function name.
@@ -657,43 +660,18 @@ def log_execution(function):
     now = datetime.now()
     schedule_diary_manager.change_entry(function.__name__, [now.day, now.weekday(), now.hour, now.minute])
 
-    """
-    # assemble new line:
-    new_line = f"{function_name} --- {day_of_month}, {weekday}, {hour}, {minute}\n"
-    updated = False
-
-    # Read all lines from the file
-    with open(SCHEDULE_DIARY_FILE, 'r') as f:
-        lines = f.readlines()
-
-    # Iterate and update the matching line
-    for i, line in enumerate(lines):
-        if line.startswith(function_name):
-            lines[i] = new_line
-            updated = True
-            break
-
-    # If no existing line found, append the new line
-    if not updated:
-        lines.append("\n" + new_line)
-
-    # Write the updated lines back to the file
-    with open(SCHEDULE_DIARY_FILE, 'w') as f:
-        f.writelines(lines)
-    """
-
 
 ###################### WORKFLOW DEFINITION ######################
 # day (of month), weekday, hour, minute
 function_schedule = {predict_and_trade: [None, [0, 1, 2, 3, 4], 16, 30],  # 20 minutes offset, because 15-min delayed prices and +5min to prevent errors
                      update_portfolio: [None,[0, 1, 2, 3, 4], 16, 0],  # update portfolio details to prepare prediction
                      fine_tune_predictors: [None, 5, 13, 0],
-                     back_test_predictors: [None, 6, 13, 0],
+                     back_test_predictors: [[8, 22], None, 17, 0],
                      parametrize_predictors: [15, None, 17, 0],
                      tell_time: [None, None, [13, 15] , [15, 45]],
                      }
 
-def check_schedule_diary(execute_missed_functions: bool = True, verbose: bool = False):
+def validate_executions(execute_missed_functions: bool = True, verbose=False):
     """
     Compares scheduling information in a diary file to a provided dictionary.
 
@@ -703,73 +681,14 @@ def check_schedule_diary(execute_missed_functions: bool = True, verbose: bool = 
     Only lines starting with keys in `function_schedule` will be compared.
     """
     chatter("Will check whether all functions have been executed according to schedule...")
-    functions_to_repeat = []
 
-    # compare all scheduled files:
-    for function, expected_schedule in function_schedule.items():
-        function_name = function.__name__
-        if function_name in schedule_diary_manager.settings_dict:
-            # last entered execution:
-            last_execution = schedule_diary_manager.get_as_type(function_name, 'float_list')
-
-            # current time for comparison:
-            now = datetime.now()
-            current_times = now.day, now.weekday(), now.hour, now.minute
-
-            # start for by assuming there's no missed execution:
-            missed_exec = False
-
-            for ind, (last, expected, current) in enumerate(zip(last_execution, expected_schedule, current_times)):
-                if missed_exec: continue  # if one time-unit already points out that execution was missed, that's sufficient
-
-                # if scheduled for multiple timepoints, pick either:
-                if isinstance(expected, list):
-                    if current in expected:  # 1) the current or
-                        expected = current
-                    else:  # 2) the latest before
-                        smaller_scheduled_times = [i for i in expected if i < current]
-                        if len(smaller_scheduled_times) == 0: continue  # no smaller expected times (execution is yet to come!)
-                        expected = smaller_scheduled_times[-1]  # last scheduled time
-
-                if expected is None:  # if regular execution is desired:
-                    expected = current - 1  # then the previous timestamp equals the expected execution
-
-                missed_exec = (last < expected < current)
-                # expected is in the past, and last is even before -> missed
-
-            # status message:
-            weekday_dict = {0: "monday", 1: "tuesday", 2: "wednesday", 3: "thursday", 4: "friday", 5: "saturday", 6: "sunday"}
-            if verbose or missed_exec: chatter(f"Function {function_name} was last executed on the {int(last_execution[0])}. ({weekday_dict[last_execution[1]]}) at {last_execution[2]}h{last_execution[3]}min.")
-
-        else:  # if no dict entry, then execution was surely missed
-            missed_exec = True
-            if verbose: chatter(f"No last execution was logged for {function_name}.")
-
-
-        # more status messages:
-        check_statement = "This is within the schedule." if not missed_exec else f"*Hence, at least one scheduled execution was missed. {'Will be re-executed afterwards.' if execute_missed_functions else 'Manual re-execution is recommended!'}*"
-        if verbose or missed_exec: chatter(check_statement)
-
-        # prepare functions for execution:
-        if missed_exec: functions_to_repeat.append(function)
+    # iterate through function schedule and validate:
+    check_result = check_schedule_diary(schedule_diary_manager, function_schedule, verbose, callback=chatter)
 
     # repeat missed executions:
     if execute_missed_functions:
-        for func in functions_to_repeat:
-            func(); log_execution(func)
-
-    """ old loop:
-    # Open the diary file in read mode and process line by line
-    with open(SCHEDULE_DIARY_FILE, 'r') as f:
-        for line in f:
-            line = line.strip()
-            # Check each function name in the dictionary
-            for function, expected_schedule in function_schedule.items():
-                function_name = function.__name__
-                if line.startswith(function_name):
-                    # Split the line on ' --- ' to separate key and value, and type-convert the values:
-                    last_execution = [int(str) for str in line.split(' --- ')[1].split(', ')]
-    """
+        for func, missed in check_result.items():
+            if missed: func(); log_execution(func)
 
 
 request_map = {
@@ -789,7 +708,7 @@ request_map = {
     #"do finetuning": fine_tune_predictors,  # shadow out computationally expensive steps that are also scheduled
     #"do backtesting": back_test_predictors,
     #"do parametrisation": parametrize_predictors,
-    "do check schedule": check_schedule_diary,
+    "do validate executions": validate_executions,
     "do toggle b1": toggle_b1_predictor,
     "do toggle b2": toggle_b2_predictor,
     "do toggle c1": toggle_c1_predictor,
