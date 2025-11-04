@@ -1,3 +1,6 @@
+import selenium.common
+import urllib3.exceptions
+
 from src.pipeline.preprocessing import StockPriceDataManager
 from src.pipeline.predictors import PredictorManager, predictor_parametrisation_loop
 from src.pipeline.rl_environments import RLTradingEnv, env_parametrisation_loop, TradeImplementor
@@ -534,10 +537,16 @@ def predict_and_trade(add_missing_isins: bool = False):
     portfolio.update_all_price_series(data_manager.non_etf_env_interp_prices)
 
     # scrape data from wikifolio
-    wf_cash, wf_value, wf_shares_p_isin, _ = update_env_from_scrape(add_missing_isins=add_missing_isins)
+    half_execution = False
+    try:
+        wf_cash, wf_value, wf_shares_p_isin, _ = update_env_from_scrape(add_missing_isins=add_missing_isins)
+        chatter("Hey! I just fetched wikifolio's statistics and today's price data. ")
+    except (urllib3.exceptions.ReadTimeoutError, selenium.common.WebDriverException):
+        chatter("Failed to fetch data from wikifolio.com...")
+        half_execution = True
 
     # status message:
-    chatter("Hey! I just fetched wikifolio's statistics and today's price data. Now inferring today's predictions.")
+    chatter("Now inferring today's predictions.")
     chatter(f"Currently the environment is at {env.current_step_timestamp}.")
 
     ### infer new action:
@@ -563,6 +572,10 @@ def predict_and_trade(add_missing_isins: bool = False):
     chatter.send_message(message=explanatory_string,  # include prediction plot
                          image_path=filemgmt.most_recent_file(PREDICTION_PLOTS, ".png", "Prediction Visualisation"))
 
+    if half_execution:
+        chatter("Since information about cash and holdings is outdated, I cannot derive the respective trades.")
+        return
+
     ### execute / tell how to execute action:
     # status messages:
     chatter(f"Currently we have {wf_cash:.2f} EUR cash in the wikifolio ({wf_cash / wf_value * 100:.2f}%).")
@@ -575,6 +588,8 @@ def predict_and_trade(add_missing_isins: bool = False):
     for trade_str in trade_str_list:
         chatter(trade_str)
         print(trade_str)
+    chatter(f"Tap the following link to conduct the trades:")
+    chatter("https://www.wikifolio.com/de/de/meine-wikifolios/trade/wfprtresen")
     chatter(f"Now the environment is at {env.current_step_timestamp}.")
 
 
@@ -663,15 +678,15 @@ def log_execution(function):
 
 ###################### WORKFLOW DEFINITION ######################
 # day (of month), weekday, hour, minute
-function_schedule = {predict_and_trade: [None, [0, 1, 2, 3, 4], 16, 30],  # 20 minutes offset, because 15-min delayed prices and +5min to prevent errors
-                     update_portfolio: [None,[0, 1, 2, 3, 4], 16, 0],  # update portfolio details to prepare prediction
+function_schedule = {predict_and_trade: [None, [0, 1, 2, 3, 4], 16, 25],  # 30 minutes offset, because 15-min delayed prices and +15min to prevent errors
+                     update_portfolio: [None, [0, 1, 2, 3, 4], 16, 0],  # update portfolio details to prepare prediction
                      fine_tune_predictors: [None, 5, 13, 0],
                      back_test_predictors: [[8, 22], None, 17, 0],
                      parametrize_predictors: [15, None, 17, 0],
                      tell_time: [None, None, [13, 15] , [15, 45]],
                      }
 
-def validate_executions(execute_missed_functions: bool = True, verbose=False):
+def validate_executions(execute_missed_functions: bool = True, verbose=True):
     """
     Compares scheduling information in a diary file to a provided dictionary.
 
@@ -688,7 +703,11 @@ def validate_executions(execute_missed_functions: bool = True, verbose=False):
     # repeat missed executions:
     if execute_missed_functions:
         for func, missed in check_result.items():
-            if missed: func(); log_execution(func)
+            if missed:
+                if func.__name__ != "predict_and_trade":
+                    func(); log_execution(func)
+                else:
+                    print("predict_and_trade won't be repeated because the proposed trades are time-specific.")
 
 
 request_map = {
@@ -703,9 +722,9 @@ request_map = {
     "describe predictors to include": describe_predictors_to_include,
     "do update environment": update_env_from_scrape,
     "do update environment predictors": update_env_predictors,
-    # "do step environment": predict_and_trade,
-    # "do update portfolio": update_portfolio,
-    #"do finetuning": fine_tune_predictors,  # shadow out computationally expensive steps that are also scheduled
+    "do step environment": predict_and_trade,
+    "do update portfolio": update_portfolio,
+    "do finetuning": fine_tune_predictors,  # shadow out computationally expensive steps that are also scheduled
     #"do backtesting": back_test_predictors,
     #"do parametrisation": parametrize_predictors,
     "do validate executions": validate_executions,
