@@ -584,12 +584,15 @@ def predict_and_trade(add_missing_isins: bool = False):
         if trade_dict["completed"]: continue  # only uncompleted trade
         trade_str_list.append(
             f"*{trade_dict['action']} {trade_dict['amount'].item() if isinstance(trade_dict['amount'], np.float16) else trade_dict['amount']} shares* of {trade_dict['isin']}. This is row {list(wf_shares_p_isin.keys()).index(trade_dict['isin'])} in wikifolio's trading desk.")
-    chatter("The resulting recommended trades are:")  # send via chatbot
-    for trade_str in trade_str_list:
-        chatter(trade_str)
-        print(trade_str)
-    chatter(f"Tap the following link to conduct the trades:")
-    chatter("https://www.wikifolio.com/de/de/meine-wikifolios/trade/wfprtresen")
+
+    if len(trade_str_list) > 0:
+        chatter("The resulting recommended trades are:")  # send via chatbot
+        for trade_str in trade_str_list:
+            chatter(trade_str)
+            print(trade_str)
+        chatter(f"Tap the following link to conduct the trades:")
+        chatter("https://www.wikifolio.com/de/de/meine-wikifolios/trade/wfprtresen")
+    else: chatter("No trades proposed.")
     chatter(f"Now the environment is at {env.current_step_timestamp}.")
 
 
