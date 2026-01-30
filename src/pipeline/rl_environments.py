@@ -1444,8 +1444,12 @@ class RLTradingEnv(gym.Env):
             visible_data = all_values[(all_values.index >= start_date)]
 
             # compute new y_lim based on the visible data and prediction cone:
-            new_y_min = min(visible_data.min().min(), prediction_cone[0])
-            new_y_max = max(visible_data.max().max(), prediction_cone[1])
+            try:
+                new_y_min = min(visible_data.min().min(), prediction_cone[0])
+                new_y_max = max(visible_data.max().max(), prediction_cone[1])
+            except AttributeError:
+                new_y_min = min(visible_data.min(), prediction_cone[0])
+                new_y_max = max(visible_data.max(), prediction_cone[1])
             compound_ax.set_ylim(new_y_min - (new_y_max - new_y_min) * .05,
                                  new_y_max + (new_y_max - new_y_min) * .05)
 
