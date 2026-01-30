@@ -7,6 +7,7 @@ import pandas as pd
 from pathlib import Path
 from typing import Literal, Union
 from tqdm import tqdm
+import time
 from alpha_vantage.timeseries import TimeSeries
 
 import src.utils.file_management as filemgmt
@@ -120,7 +121,7 @@ class StockPriceDataManager:
                  scrape_raw_download_dir: Path = None,
 
                  env_sampling_rate_minutes: Literal[15, 60, 1440] = 15,
-                 price_column: Literal['low', 'high', 'open', 'close'] = 'close',
+                 price_column: Literal['low', 'high', 'open', 'close'] = 'open',
                  is_etf_price_data: bool = False,
                  non_etf_time_price_tuples: [(pd.Timestamp, float)] = None,
                  download_time_increment: str = "6h",  # for US downloads
@@ -221,7 +222,7 @@ class StockPriceDataManager:
         return read_price_csv(
             filemgmt.most_recent_file(self.interpolated_files_dir,
                                       suffix_to_consider=".csv",
-                                      file_title_keywords=[self.ticker_symbol, self.env_sampling_rate_str]),
+                                      file_title_keywords=[self.ticker_symbol, self.env_sampling_rate_str, self.price_column]),
             date_column='date', price_column=self.price_column)
 
     @property
@@ -230,7 +231,7 @@ class StockPriceDataManager:
         return read_price_csv(
             filemgmt.most_recent_file(self.interpolated_files_dir,
                                       suffix_to_consider=".csv",
-                                      file_title_keywords=[self.ticker_symbol, self.env_sampling_rate_str]),
+                                      file_title_keywords=[self.ticker_symbol, self.env_sampling_rate_str, self.price_column]),
             date_column='date',
             price_column=self.price_column) * self.non_etf_price_factor  # multiply with non-etf-factor
 
@@ -240,7 +241,7 @@ class StockPriceDataManager:
         return read_price_csv(
             filemgmt.most_recent_file(self.interpolated_files_dir,
                                       suffix_to_consider=".csv",
-                                      file_title_keywords=[self.ticker_symbol, self.a_sampling_rate_str]),
+                                      file_title_keywords=[self.ticker_symbol, self.a_sampling_rate_str, self.price_column]),
             date_column='date', price_column=self.price_column)
 
     @property
@@ -249,7 +250,7 @@ class StockPriceDataManager:
         return read_price_csv(
             filemgmt.most_recent_file(self.interpolated_files_dir,
                                       suffix_to_consider=".csv",
-                                      file_title_keywords=[self.ticker_symbol, self.env_sampling_rate_str]),
+                                      file_title_keywords=[self.ticker_symbol, self.env_sampling_rate_str, self.price_column]),
             date_column='date', price_column=self.price_column)
 
     @property
@@ -258,7 +259,7 @@ class StockPriceDataManager:
         return read_price_csv(
             filemgmt.most_recent_file(self.interpolated_files_dir,
                                       suffix_to_consider=".csv",
-                                      file_title_keywords=[self.ticker_symbol, self.c_sampling_rate_str]),
+                                      file_title_keywords=[self.ticker_symbol, self.c_sampling_rate_str, self.price_column]),
             date_column='date', price_column=self.price_column)
 
     @property
@@ -267,7 +268,7 @@ class StockPriceDataManager:
         return read_price_csv(
             filemgmt.most_recent_file(self.interpolated_files_dir,
                                       suffix_to_consider=".csv",
-                                      file_title_keywords=[self.ticker_symbol, self.d_sampling_rate_str]),
+                                      file_title_keywords=[self.ticker_symbol, self.d_sampling_rate_str, self.price_column]),
             date_column='date', price_column=self.price_column)
 
     @property
@@ -323,18 +324,18 @@ class StockPriceDataManager:
     #### Methods ####
     def download_new_data(self):
         """ Download most recent data from AlphaVantage """
-        # define timerange to download:
-        latest_data = self.downloaded_data_time_range[1]
-        start_tuple = (latest_data.year, latest_data.month)
-        end_tuple = (datetime.today().year, datetime.today().month)
+        # the below is necessary if deciding to use get_intraday (currently premium feature) again:
+        #latest_data = self.downloaded_data_time_range[1]
+        #start_tuple = (latest_data.year, latest_data.month)
+        #end_tuple = (datetime.today().year, datetime.today().month)
 
         get_data_from_alphavantage(self._alpha_vantage_api_key,
                                    ticker=self.ticker_symbol,
                                    save_path=self.download_dir,
-                                   start_year_month=start_tuple,
-                                   end_year_month=end_tuple,
-                                   price_frame_to_concat=self.downloaded_price_frame,
-                                   time_increment=self.download_time_increment)
+                                   #start_year_month=start_tuple,
+                                   #end_year_month=end_tuple,
+                                   price_frame_to_concat=self.downloaded_price_frame,)
+                                   #time_increment=self.download_time_increment)
 
     def update_interpolated_data(self):
         """ Interpolate and sample all price files based on most recent data download. """
@@ -635,7 +636,7 @@ def create_train_validation_split(X: np.ndarray, Y: np.ndarray,
 
 
 ### Data download functions
-def read_price_csv(csv_path: str, date_column: str = "date", price_column: str = "close") -> pd.Series:
+def read_price_csv(csv_path: str, date_column: str = "date", price_column: str = "open") -> pd.Series:
     """ Read price csv file. Type conversion, NA-cleaning and formatting. """
     # import csv w correct dtypes:
     price_file = pd.read_csv(csv_path).dropna(axis=0)
@@ -719,9 +720,13 @@ def get_data_from_yahoo(ticker: str = '^GDAXI', duration_days: int = None, sampl
 
 def get_data_from_alphavantage(api_key: str,
                                ticker: str = 'DAX',
-                               start_year_month: (int, int) = None, end_year_month: (int, int) = None,
-                               sampling_rate: Literal['1min', '5min', '15min', '30min', '60min'] = '1min',
-                               time_increment: str = None, time_decrement: str = None,
+
+                               # the below would become necessary again if deciding to use get_intraday again
+                               #start_year_month: (int, int) = None, end_year_month: (int, int) = None,
+                               #sampling_rate: Literal['1min', '5min', '15min', '30min', '60min'] = '15min',
+                               #time_increment: str = None, time_decrement: str = None,
+
+                               price_column: Literal['low', 'high', 'open', 'close'] = 'open',
                                price_csv_dir_to_concat: Union[Path, str] = None,
                                price_frame_to_concat: pd.DataFrame = None,
                                save_path=None) -> pd.DataFrame:
@@ -751,6 +756,8 @@ def get_data_from_alphavantage(api_key: str,
 
     :return:
     """
+    """
+    # THIS ISN'T NECESSARY ANYMORE, BECAUSE GET_INTRADAY WAS REASSIGNED TO PREMIUM MEMBERSHIP PLAN.
     # if no end date specified download until start date:
     if start_year_month is not None and end_year_month is None:
         end_year_month = start_year_month
@@ -781,6 +788,7 @@ def get_data_from_alphavantage(api_key: str,
     else:
         print("No time range specified. Will download price data of last 30 days.")
         list_of_year_month_strings.append(None)
+    """
 
     # prepare dataframe or load existing one:
     if price_frame_to_concat is not None or price_csv_dir_to_concat is not None:
@@ -796,7 +804,7 @@ def get_data_from_alphavantage(api_key: str,
             # set datetime as index:
             price_frame['date'] = pd.to_datetime(price_frame['date'])
             price_frame.set_index('date', inplace=True)
-            
+
         else:  # utilize provided dataframe
             price_frame = price_frame_to_concat
 
@@ -804,12 +812,11 @@ def get_data_from_alphavantage(api_key: str,
         price_frame = pd.DataFrame()
 
     # query and concat:
+    """ # THIS DOESNT WORK ANYMORE, BECAUSE TS.GET_INTRADAY() WAS CHANGED TO A PREMIUM FEATURE.
     for year_month in tqdm(list_of_year_month_strings):
         ts = TimeSeries(key=api_key, output_format='pandas')  # initialise time-series API
         try:  # query:
-            temp_price_frame = \
-            ts.get_intraday(ticker, extended_hours=False, interval=sampling_rate, month=year_month, outputsize="full")[
-                0]
+            temp_price_frame = ts.get_intraday(ticker, extended_hours=False, interval=sampling_rate, month=year_month, outputsize="compact")[0]  # -> now premium endpoint :(
 
             temp_price_frame.reset_index(inplace=True)
             # eventually adjust for foreign time-zone:
@@ -820,6 +827,28 @@ def get_data_from_alphavantage(api_key: str,
             price_frame = pd.concat([price_frame, temp_price_frame])
         except ValueError as err:  # occurs if capacity for free queries is exhausted
             print(err)
+
+        # wait to not exceed free API request time limit (1/second):
+        time.sleep(1)
+    """
+    ### DAILY DATA DRAFT
+    # API call:
+    ts = TimeSeries(key=api_key, output_format='pandas')  # initialise time-series API
+    temp_price_frame = ts.get_daily(ticker, outputsize="compact")[0]  # "compact" -> last 100 days
+
+    # timestamp assignment:
+    temp_price_frame.reset_index(inplace=True)
+    temp_price_frame['date'] = pd.to_datetime(temp_price_frame['date'])
+    # now, since daily downloads, we amend the timestamp of the column of interest, and replace the rest:
+    if price_column == 'open': hour_increment = "16h"
+    elif price_column == 'close': hour_increment = "22h"
+    else: raise ValueError(f"To assign daily price downloads with correct timestamps only 'close' or 'open' are allowed as price_column. You provided: {price_column}")
+    temp_price_frame['date'] = temp_price_frame['date']+ pd.Timedelta(hour_increment)
+    temp_price_frame.set_index('date', inplace=True)
+
+    # concat with original frame:
+    price_frame = pd.concat([price_frame, temp_price_frame])
+
     # sort the data according to datetimes and remove duplicates:
     price_frame.sort_index(inplace=True)
     #price_frame.drop_duplicates(inplace=True)
