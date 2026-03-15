@@ -10,6 +10,7 @@ dependencies:
   - pandas
   - pip
   - pytorch
+  - python=3.12
   - scipy
   - torchvision
   - tqdm
