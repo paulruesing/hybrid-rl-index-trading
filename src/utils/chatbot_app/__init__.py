@@ -1,6 +1,7 @@
 from flask import Flask
 from src.utils.chatbot_app.config import load_configurations, configure_logging
 from .views import webhook_blueprint
+from .telegram_views import telegram_blueprint
 
 
 def create_app():
@@ -12,5 +13,6 @@ def create_app():
 
     # Import and register blueprints, if any
     app.register_blueprint(webhook_blueprint)
+    app.register_blueprint(telegram_blueprint)
 
     return app

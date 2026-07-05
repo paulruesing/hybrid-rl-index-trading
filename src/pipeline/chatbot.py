@@ -302,6 +302,190 @@ class WhatsAppChatbot:
 
 
 
+class TelegramChatbot:
+    """
+    Class TelegramChatbot
+
+    Manages sending messages via the Telegram Bot API. Loads necessary configuration
+    from an environment file and provides methods to send text messages and images.
+    Much simpler than WhatsAppChatbot: Telegram's `sendPhoto` accepts a direct file
+    upload, no separate media-upload-then-reference step is required.
+
+    Parameters
+    ----------
+    chatbot_env_path : Union[str, Path]
+        Path to the environment file (.env) containing the bot token and chat id.
+    verbose : bool, optional
+        If True, enables verbose logging for debugging. Default is False.
+
+    Raises
+    ------
+    ValueError
+        If loading the environment file fails or required credentials are missing.
+
+    Attributes
+    ----------
+    _bot_token : str
+        Telegram bot API token issued by @BotFather.
+    _chat_id : str
+        Telegram chat ID of the message recipient (the user's own chat with the bot).
+    verbose : bool
+        Indicates whether verbose logging is enabled.
+    """
+
+    _API_BASE = "https://api.telegram.org/bot{token}/{method}"
+    _MAX_TEXT_LENGTH = 4096       # Telegram sendMessage limit
+    _MAX_CAPTION_LENGTH = 1024    # Telegram sendPhoto caption limit
+
+    def __init__(self, chatbot_env_path: Union[str, Path], verbose: bool = False):
+        if not load_dotenv(chatbot_env_path): raise ValueError("Failed to load .env file")
+        self._bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+        self._chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        if not self._bot_token or not self._chat_id:
+            raise ValueError("Missing required environment variables: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID")
+
+        self.verbose = verbose
+
+    def __call__(self, message: str):
+        """
+        Parameters
+        ----------
+        message : str
+            The message to be sent using the `send_message` method.
+        """
+        self.send_message(message)
+
+    def send_message(self, message: str, image_path: Union[str, Path] = None) -> bool:
+        """
+        Sends a message with an optional image attachment.
+
+        Parameters
+        ----------
+        message : str
+            The text message to be sent (used as the photo caption if an image is provided).
+        image_path : Union[str, Path], optional
+            The file path to an image to be sent as a photo. Defaults to None.
+
+        Returns
+        -------
+        bool
+            True if the message was sent successfully, False otherwise.
+        """
+        if self.verbose:
+            print("Sending message: {}".format(message))
+
+        if image_path is not None:
+            return self._send_photo(message, image_path)
+        return self._send_text(message)
+
+    # auxiliary methods:
+    def _send_text(self, text: str) -> bool:
+        """ Send a plain text message via the Telegram Bot API. """
+        text = text[:self._MAX_TEXT_LENGTH]
+        url = self._API_BASE.format(token=self._bot_token, method="sendMessage")
+        data = {"chat_id": self._chat_id, "text": text, "parse_mode": "Markdown"}
+        return self._send_message_backend(url, data=data)
+
+    def _send_photo(self, caption: str, image_path: Union[str, Path]) -> bool:
+        """ Send an image with an optional caption via the Telegram Bot API. """
+        image_path = image_path if isinstance(image_path, Path) else Path(image_path)
+        if not image_path.exists():
+            raise FileNotFoundError(f"Image file not found: {image_path}")
+
+        caption = caption[:self._MAX_CAPTION_LENGTH]
+        url = self._API_BASE.format(token=self._bot_token, method="sendPhoto")
+        data = {"chat_id": self._chat_id, "caption": caption}
+        with open(image_path, "rb") as image_file:
+            files = {"photo": (image_path.name, image_file)}
+            return self._send_message_backend(url, data=data, files=files)
+
+    def _send_message_backend(self, url: str, data: dict, files: dict = None) -> bool:
+        """
+        Posts a prepared payload to the Telegram Bot API and reports success.
+
+        Parameters
+        ----------
+        url : str
+            Fully-formed Telegram Bot API endpoint.
+        data : dict
+            Form-data payload (chat_id, text/caption, etc.).
+        files : dict, optional
+            File payload for photo uploads.
+
+        Returns
+        -------
+        bool
+            True if the API reported success, False otherwise.
+        """
+        try:
+            response = requests.post(url, data=data, files=files, timeout=10)
+        except requests.RequestException as e:
+            if self.verbose: print(f"Telegram request failed: {e}")
+            return False
+
+        if self.verbose:
+            print("Status:", response.status_code)
+            print("Body:", response.text)
+
+        return response.status_code == 200 and response.json().get("ok", False)
+
+    def test_connection(self) -> bool:
+        """
+        Verifies the bot token by calling the Telegram `getMe` endpoint.
+
+        Returns
+        -------
+        bool
+            True if the token is valid and the bot could be reached, False otherwise.
+        """
+        url = self._API_BASE.format(token=self._bot_token, method="getMe")
+        try:
+            response = requests.get(url, timeout=10)
+        except requests.RequestException as e:
+            if self.verbose: print(f"Telegram connection test failed: {e}")
+            return False
+
+        if self.verbose:
+            print(response.status_code)
+            print(response.text)
+        return response.status_code == 200 and response.json().get("ok", False)
+
+    def set_webhook(self, webhook_url: str, secret_token: str = None) -> bool:
+        """
+        Registers the given URL as the Telegram webhook for this bot. Only needs to
+        be called once (or whenever the public ngrok URL changes).
+
+        Parameters
+        ----------
+        webhook_url : str
+            Publicly reachable HTTPS URL of the Telegram webhook route (e.g. the
+            ngrok domain + "/telegram-webhook").
+        secret_token : str, optional
+            Secret token Telegram will echo back in the
+            `X-Telegram-Bot-Api-Secret-Token` header on every webhook call, so the
+            receiving endpoint can verify the request actually came from Telegram.
+
+        Returns
+        -------
+        bool
+            True if the webhook was registered successfully, False otherwise.
+        """
+        url = self._API_BASE.format(token=self._bot_token, method="setWebhook")
+        data = {"url": webhook_url}
+        if secret_token is not None: data["secret_token"] = secret_token
+
+        try:
+            response = requests.post(url, data=data, timeout=10)
+        except requests.RequestException as e:
+            if self.verbose: print(f"Failed to set Telegram webhook: {e}")
+            return False
+
+        if self.verbose:
+            print(response.status_code)
+            print(response.text)
+        return response.status_code == 200 and response.json().get("ok", False)
+
+
 class MailChatbot:
     """
     Class MailChatbot

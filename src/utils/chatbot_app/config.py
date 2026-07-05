@@ -14,6 +14,9 @@ def load_configurations(app):
     app.config["VERSION"] = os.getenv("VERSION")
     app.config["PHONE_NUMBER_ID"] = os.getenv("PHONE_NUMBER_ID")
     app.config["VERIFY_TOKEN"] = os.getenv("VERIFY_TOKEN")
+    app.config["TELEGRAM_BOT_TOKEN"] = os.getenv("TELEGRAM_BOT_TOKEN")
+    app.config["TELEGRAM_CHAT_ID"] = os.getenv("TELEGRAM_CHAT_ID")
+    app.config["TELEGRAM_WEBHOOK_SECRET"] = os.getenv("TELEGRAM_WEBHOOK_SECRET")
 
 
 def configure_logging():
