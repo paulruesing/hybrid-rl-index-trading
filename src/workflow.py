@@ -6,7 +6,7 @@ from src.pipeline.predictors import PredictorManager, predictor_parametrisation_
 from src.pipeline.rl_environments import RLTradingEnv, env_parametrisation_loop, TradeImplementor
 from src.pipeline.rl_agents import MultiProductAgent
 from src.pipeline.financial_products import KOCertificate, KOCertificateSet
-from src.pipeline.chatbot import WhatsAppChatbot
+from src.pipeline.chatbot import WhatsAppChatbot, MailChatbot, TelegramChatbot
 from src.utils.function_decorators import retry_decorator, timed_callback_decorator
 import src.pipeline.web_interaction as webinteraction
 import src.utils.file_management as filemgmt
@@ -53,17 +53,18 @@ TRAINING_LOGS = ROOT / "output" / "rl_training_logs"
 PREDICTION_PLOTS = ROOT / "output" / "prediction_plots"
 
 PRIVATE_FILES = ROOT / "private"
+INPUT_FILES = ROOT / "input"  # config/credential files live here now (moved out of private/)
 # define config files:
-SCHEDULE_DIARY_FILE = PRIVATE_FILES / "schedule_diary.txt"
-ENV_CONFIGURATION_FILE = PRIVATE_FILES / "env_configuration.txt"
-CHATBOT_ENV_FILE = PRIVATE_FILES / "chatbot.env"
+SCHEDULE_DIARY_FILE = INPUT_FILES / "schedule_diary.txt"
+ENV_CONFIGURATION_FILE = INPUT_FILES / "env_configuration.txt"
+CHATBOT_ENV_FILE = INPUT_FILES / "chatbot.env"
 # read in config files:
 schedule_diary_manager = filemgmt.TxtConfig(SCHEDULE_DIARY_FILE)
 env_config_manager = filemgmt.TxtConfig(ENV_CONFIGURATION_FILE)
 if not load_dotenv(CHATBOT_ENV_FILE):
     raise ValueError("Failed to load .env file")
 # define and read key files:
-AV_API_KEY_FILE = PRIVATE_FILES / "Alpha Vantage API Key.txt"
+AV_API_KEY_FILE = INPUT_FILES / "Alpha Vantage API Key.txt"
 with open(AV_API_KEY_FILE) as file: AV_API_KEY = file.read()
 WIKIFOLIO_KEY_FILE = PRIVATE_FILES / "Wikifolio key.txt"
 with open(WIKIFOLIO_KEY_FILE) as file: WIKIFOLIO_USER_KEY = file.read().split('\n')
@@ -77,16 +78,16 @@ data_manager = StockPriceDataManager(ticker_symbol='DAX',
                                     alpha_vantage_api_key=AV_API_KEY,
                                     env_sampling_rate_minutes=15,
                                     is_etf_price_data=True,
-                                    non_etf_time_price_tuples=[('2025-06-04 18:00:00', 24276.48),
-                                                               ('2025-06-02 17:00:00', 23942.52),
-                                                               ('2025-06-03 12:00:00', 23962.40),
-                                                               ('2025-05-30 17:00:00', 23997.71)],
+                                    non_etf_time_price_tuples=[('2026-06-18 16:00:00', 24996.54),
+                                                               ('2026-06-17 16:00:00', 24816.96),
+                                                               ('2026-06-16 16:00:00', 24942.73),
+                                                               ('2026-06-15 16:00:00', 25068.37)],
                                     include_scraped_downloads=False, #(scenario == "deployment"),
                                      scrape_raw_download_dir=SCRAPED_RAW_DOWNLOADS,
                                     )
 
 pred_manager = PredictorManager(data_manager=data_manager, initialisation_dir=SAVED_MODELS, recursive=True,
-                                not_older_than_n_days=15,  # only recently fine-tuned models
+                                not_older_than_n_days=30,  # only recently fine-tuned models
                                 )
 
 
@@ -122,7 +123,14 @@ agent = MultiProductAgent(observation_types=env.observation_types,
                           potential_treshold_horizon_days=env.potential_horizon_days,
                           )
 
-chatter = WhatsAppChatbot("../private/chatbot.env", verbose=True)
+chatter = MailChatbot(CHATBOT_ENV_FILE, verbose=True)  # WhatsAppChatbot(CHATBOT_ENV_FILE, verbose=True)
+
+try:  # Telegram push notifications; requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in input/chatbot.env.
+    telegram_chatter = TelegramChatbot(CHATBOT_ENV_FILE, verbose=True)
+except ValueError:
+    telegram_chatter = None
+    print(f"TelegramChatbot not configured yet: add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to {CHATBOT_ENV_FILE}, "
+          "then call telegram_chatter.set_webhook(<ngrok-url> + '/telegram-webhook') once to register the webhook.")
 
 
 ###################### DESCRIPTIVE FUNCTIONS ######################
@@ -354,8 +362,9 @@ def describe_predictors_to_include():
 # SATURDAYS
 @timed_callback_decorator(callback=chatter)
 @retry_decorator(on_error_callback=chatter)
-def fine_tune_predictors(patience_tuple: [int] = (10, 20), presets_to_include: [str] = ("b1", "b2", "c1", "c2", "d1", "d2", "d3")):
+def fine_tune_predictors(patience_tuple: [int] = (10,), presets_to_include: [str] = ("b1", "b2", "c1", "c2", "d1", "d2", "d3")):
     # reinitialise predictor manager with larger not_older_than_n_days
+    data_manager.update()
     temp_pred_manager = PredictorManager(data_manager=data_manager, initialisation_dir=SAVED_MODELS, recursive=True,
                                          not_older_than_n_days=60,  # models of last two month
                                          )
@@ -553,6 +562,9 @@ def predict_and_trade(add_missing_isins: bool = False):
     action, _ = agent.predict(env.current_observation)  # predict action
     env.plot_current_predictions(save_fig_directory=PREDICTION_PLOTS, hidden=False)  # save prediction plot
 
+    # todo: implement try/except, to send prediction plot even if no concrete recommendation could be derived
+    # try: (todo)
+
     # read out all required observations before stepping (because then new observations are yielded):
     potential_estimates = env.current_potential_estimates
     avg_potential = env.current_avg_scaled_predicted_potential
@@ -563,6 +575,8 @@ def predict_and_trade(add_missing_isins: bool = False):
                                                  start_new_episode_if_finished=False,
                                                  trade_implementation_callback=trade_implementor)  # step env
 
+    # except: (todo)
+
     # status messages:
     predictions_str_list = [f"{round(potential * 100, 2)} % in {round(horizon_minutes / 60 / 14)} days" for
                             potential, horizon_minutes in
@@ -570,7 +584,8 @@ def predict_and_trade(add_missing_isins: bool = False):
     prediction_str = "\n".join(predictions_str_list)  # will be included in next str:
     explanatory_string = f"Based on the *predictions*\n\n{prediction_str}\n\n-> an *average predicted potential of {avg_potential * 100:.2f} %* in {env.potential_horizon_days} days, the agent wants to *{info['Action']}*!"
     chatter.send_message(message=explanatory_string,  # include prediction plot
-                         image_path=filemgmt.most_recent_file(PREDICTION_PLOTS, ".png", "Prediction Visualisation"))
+                         subject="TradingBot: New Prediction",
+                         attachment_path=filemgmt.most_recent_file(PREDICTION_PLOTS, ".png", "Prediction Visualisation"))
 
     if half_execution:
         chatter("Since information about cash and holdings is outdated, I cannot derive the respective trades.")
@@ -681,15 +696,19 @@ def log_execution(function):
 
 ###################### WORKFLOW DEFINITION ######################
 # day (of month), weekday, hour, minute
-function_schedule = {predict_and_trade: [None, [0, 1, 2, 3, 4], 16, 25],  # 30 minutes offset, because 15-min delayed prices and +15min to prevent errors
-                     update_portfolio: [None, [0, 1, 2, 3, 4], 16, 0],  # update portfolio details to prepare prediction
-                     fine_tune_predictors: [None, 5, 13, 0],
-                     back_test_predictors: [[8, 22], None, 17, 0],
-                     parametrize_predictors: [15, None, 17, 0],
-                     tell_time: [None, None, [13, 15] , [15, 45]],
-                     }
+function_schedule = {
+    predict_and_trade: [None, [0, 1, 2, 3, 4], 16, 59],
+    # 45min after relevant prices: 15min delayed prices + 30min to prevent errors
 
-def validate_executions(execute_missed_functions: bool = True, verbose=True):
+    update_portfolio: [None, [0, 1, 2, 3, 4], 16, 15],  # update portfolio details to prepare prediction
+
+    fine_tune_predictors: [None, 0, 17, 54],
+    back_test_predictors: [[8, 22], None, 17, 0],
+    parametrize_predictors: [15, None, 17, 0],
+    tell_time: [None, None, [13, 15], [15, 45]],
+}
+
+def validate_executions(execute_missed_functions: bool = False, verbose=True):
     """
     Compares scheduling information in a diary file to a provided dictionary.
 
@@ -727,7 +746,7 @@ request_map = {
     "do update environment predictors": update_env_predictors,
     "do step environment": predict_and_trade,
     "do update portfolio": update_portfolio,
-    "do finetuning": fine_tune_predictors,  # shadow out computationally expensive steps that are also scheduled
+    # "do finetuning": fine_tune_predictors,  # shadow out computationally expensive steps that are also scheduled
     #"do backtesting": back_test_predictors,
     #"do parametrisation": parametrize_predictors,
     "do validate executions": validate_executions,
