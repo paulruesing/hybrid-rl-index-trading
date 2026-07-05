@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from typing import Literal, Union, Tuple
 import re
+import copy
 from pathlib import Path
 
 from sympy import print_python
@@ -228,6 +229,9 @@ class TransformerModel(nn.Module):
             decoder_input = self.start_token.repeat(batch_size, 1, 1)
             # .repeat duplicates a tensor
         else:  # initialise decoder_input that then gets auto-regressively extended along dimension 1
+            # BUG(R3): this slices the batch dimension ([:-1]), not the sequence dimension -- should be
+            # encoder_output[:, -1:, :]. Only triggers when use_start_token=False (default is True).
+            # Out of scope for Phase 1; belongs to the deferred R3 Transformer audit.
             decoder_input = encoder_output[: -1:, :]  # use last encoder features as starting point
         # dimension of decoder_input in both cases is (batch_size, 1, d_model)
 
@@ -277,7 +281,7 @@ class TransformerModel(nn.Module):
         return outputs  # (batch_size, n_forecast_steps)
 
     def run_epoch(self, dataloader, optimiser, device='cpu', loss_criterion=nn.MSELoss(),
-                  is_training=False, teacher_forcing_ratio: float = 0.5):
+                  is_training=False, teacher_forcing_ratio: float = 0.5, clip_grad_max_norm: float = 1000.0):
         """
         Run one epoch of training or validation.
 
@@ -296,12 +300,20 @@ class TransformerModel(nn.Module):
         teacher_forcing_ratio : float, default 0.5
             probability for feeding ground truth as decoder input instead of previous prediction.
             accelerates convergence and stabilises training.
+        clip_grad_max_norm : float, default 1000.0
+            Maximum gradient norm for gradient clipping (only applied while training). Empirically
+            diagnosed on the c1 preset with WeightedMSELoss's (ratio-1)*100 scaling (Phase 1.1/1.6):
+            pre-clip gradient norms for this recursive multi-step architecture routinely sit in the
+            hundreds (occasionally spiking into the tens of thousands during early epochs). A small
+            max_norm like 1.0 clips essentially every batch, turning it into a de-facto learning-rate
+            cap rather than a spike safety-net; 1000.0 clips only a small minority of batches (~2-3%
+            observed) while still catching genuine early-training blowups.
 
         Returns
         -------
         tuple
             Tuple containing:
-            - epoch_loss (float): Sum of batch losses across the epoch.
+            - epoch_loss (float): Batch-averaged loss across the epoch.
             - lr (float): Current learning rate of the optimizer.
         """
         epoch_loss = 0
@@ -318,12 +330,14 @@ class TransformerModel(nn.Module):
 
             if is_training:
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=clip_grad_max_norm)
                 optimiser.step()
 
             epoch_loss += loss.detach().item()
 
+        n_batches = len(dataloader)
         lr = optimiser.param_groups[0]['lr']
-        return epoch_loss, lr
+        return epoch_loss / max(n_batches, 1), lr
 
     def predict(self, dataloader, device='cpu'):
         """
@@ -548,7 +562,8 @@ class LSTMModel(nn.Module):
 
         return outputs.squeeze(-1)  # remove dimensions with size 1
 
-    def run_epoch(self, dataloader, optimiser, device='cpu', loss_criterion=nn.MSELoss(), is_training=False):
+    def run_epoch(self, dataloader, optimiser, device='cpu', loss_criterion=nn.MSELoss(), is_training=False,
+                 clip_grad_max_norm: float = 1000.0):
         """
         Run one epoch of training or validation.
 
@@ -564,12 +579,20 @@ class LSTMModel(nn.Module):
             Loss function to compute training/validation loss.
         is_training : bool, default False
             Whether to perform training (True) or evaluation (False).
+        clip_grad_max_norm : float, default 1000.0
+            Maximum gradient norm for gradient clipping (only applied while training). Empirically
+            diagnosed on the c1 preset with WeightedMSELoss's (ratio-1)*100 scaling (Phase 1.1/1.6):
+            pre-clip gradient norms for this recursive multi-step architecture routinely sit in the
+            hundreds (occasionally spiking into the tens of thousands during early epochs). A small
+            max_norm like 1.0 clips essentially every batch, turning it into a de-facto learning-rate
+            cap rather than a spike safety-net; 1000.0 clips only a small minority of batches (~2-3%
+            observed) while still catching genuine early-training blowups.
 
         Returns
         -------
         tuple
             Tuple containing:
-            - epoch_loss (float): Sum of batch losses across the epoch.
+            - epoch_loss (float): Batch-averaged loss across the epoch.
             - lr (float): Current learning rate of the optimizer.
         """
         epoch_loss = 0
@@ -590,14 +613,16 @@ class LSTMModel(nn.Module):
 
             if is_training:
                 loss.backward()  # backpropagation, traverses computational graph in reverse applying the chain rule to compute gradients
+                torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=clip_grad_max_norm)  # spike safety-net, sits between backward() and step()
                 optimiser.step()  # optimise weights
 
-            epoch_loss += loss.detach().item()  # without / batchsize because loss is already averaged, detach loss value from computational graph
+            epoch_loss += loss.detach().item()  # accumulated per-batch (element-averaged) losses; divided by n_batches below for a batch-averaged epoch loss
 
         # learning rate:
         lr = optimiser.param_groups[0]['lr']
 
-        return epoch_loss, lr
+        n_batches = len(dataloader)
+        return epoch_loss / max(n_batches, 1), lr
 
     def predict(self, dataloader, device='cpu'):
         """
@@ -635,7 +660,7 @@ class LSTMModel(nn.Module):
 ######################### Predictor classes #########################
 class NNPredictor:
     def __init__(self,
-                 preset_type: Literal['a1', 'b1', 'b2', 'c1', 'c2', 'd1', 'd2', 'd3'] = None,
+                 preset_type: Literal['b1', 'b2', 'c1', 'c2', 'd1', 'd2', 'd3'] = None,
                  name: str = None,
                  # allows for automatic inference of sampling_rate_minutes, daily_prediction_hour,
                  # predict_before_daily_prediction_hour, rolling_window_size and forecast_horizon
@@ -649,7 +674,6 @@ class NNPredictor:
                  rolling_window_size: int = 32,
                  forecast_horizon: int = 12,
                  validation_split: float = 0.2,
-                 randomise_validation_data_every: int = 10,
                  batch_size: int = 32,
 
                  forecast_step_loss_weight_range: [float, float] = (1, 0.7),  # eval parameter
@@ -676,8 +700,6 @@ class NNPredictor:
             self._preset_type = 'custom'
         else:
             preset_type_dict = {
-                # 15 minutes sampling
-                'a1': (15, 13, False, 20, 12),
                 # values = sampling_rate_min, daily_prediction_hour, predict_before_daily_prediction_hour, rolling_window_size, forecast_horizon
                 # 1 hour sampling:
                 'b1': (60, 16, True, 42, 14),
@@ -701,7 +723,6 @@ class NNPredictor:
         self._date_column = date_column
         self._price_column = price_column
         self._validation_split = validation_split
-        self.randomise_validation_data_every = randomise_validation_data_every
         self._batch_size = batch_size
         self.verbose = verbose
         self._use_mps_if_available = use_mps_if_available
@@ -718,11 +739,10 @@ class NNPredictor:
         self.evaluate_hit_rate_upon_training = evaluate_hit_rate_upon_training
 
         ### placeholders:
-        self._normalised_price_series = None
-        self._normaliser = preprocessing.Normaliser()  # initialise normaliser
-        _ = self.normalised_price_series  # access property once, leads to fitting of normaliser for further use
         self._X = self._Y = self._X_dates = self._Y_dates = None
+        self._X_reference_prices = None
         self._X_train = self._X_val = self._Y_train = self._Y_val = self._X_dates_train = self._X_dates_val = self._Y_dates_train = self._Y_dates_val = None
+        self._X_reference_prices_train = self._X_reference_prices_val = None
         self._dataloader_train = self._dataloader_val = None
 
         self._device = None
@@ -750,7 +770,7 @@ class NNPredictor:
     def describe(self):
         """ Should be overwritten through inheriting classes. """
         intro_str = "------------------- NNPredictor Instance -------------------\n\n"
-        data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /14} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- randomise validation data every: {self.randomise_validation_data_every}th epoch\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
+        data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /14} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
         if self.n_train_epochs is not None:
             training_str = f"Training Attributes:\n- final training loss: {self.loss_train}\n- final validation loss: {self.loss_val}\n- final training hit-rate: {self.hit_rate_train}\n- final validation hit-rate: {self.hit_rate_val}"
         else:
@@ -804,17 +824,7 @@ class NNPredictor:
 
     ### data preparation properties:
     @property
-    def normalised_price_series(self):
-        if self._normalised_price_series is None:
-            self._normalised_price_series = self._normaliser.fit_transform(self.price_series)
-        return self._normalised_price_series
-
-    @property
-    def normaliser(self):
-        return self._normaliser
-
-    @property
-    def preset_type(self) -> Literal['a1', 'b1', 'b2', 'c1', 'c2', 'd1', 'd2', 'd3', 'custom']:
+    def preset_type(self) -> Literal['b1', 'b2', 'c1', 'c2', 'd1', 'd2', 'd3', 'custom']:
         """ Predictor preset_type. """
         return self._preset_type
 
@@ -880,6 +890,12 @@ class NNPredictor:
         return self._Y_dates
 
     @property
+    def X_reference_prices(self):
+        """ Per-window reference price (last value of each X window) used to ratio-normalise X/Y. Shape (n_samples, 1). """
+        if self._X_reference_prices is None: self.prepare_data()
+        return self._X_reference_prices
+
+    @property
     def validation_split(self):
         return self._validation_split
 
@@ -929,6 +945,16 @@ class NNPredictor:
         return self._Y_dates_val
 
     @property
+    def X_reference_prices_train(self):
+        if self._X_reference_prices_train is None: self.split_data()
+        return self._X_reference_prices_train
+
+    @property
+    def X_reference_prices_val(self):
+        if self._X_reference_prices_val is None: self.split_data()
+        return self._X_reference_prices_val
+
+    @property
     def dataset_train(self):
         return TimeSeriesDataset(self.X_train, self.Y_train)
 
@@ -946,7 +972,10 @@ class NNPredictor:
 
     @property
     def dataloader_val(self):
-        return DataLoader(self.dataset_val, batch_size=self.batch_size, shuffle=True)
+        # shuffle=False: shuffling val batches never leaked data, but it's pointless and makes val loss
+        # traversal order nondeterministic. It also preserves row-wise alignment with Y_val/X_val for
+        # nn_model.predict()'s own shuffle=False, batch_size=1 loader used by the hit-rate properties.
+        return DataLoader(self.dataset_val, batch_size=self.batch_size, shuffle=False)
 
     ### training properties: ###
     @property
@@ -1049,6 +1078,27 @@ class NNPredictor:
         """ How often model predicts right direction of price development (hit rate) in validation samples. """
         return metrics.HitRateMetric()(self.predictions_val, self.Y_val, self.X_val)
 
+    @property
+    def naive_loss_val(self):
+        """
+        Loss of trivially predicting 'no change' (ratio 1.0) on the validation split.
+
+        The meaningful comparison is naive_loss_val vs. loss_val: a trained model whose validation
+        loss is not clearly below the naive baseline has learned nothing.
+        """
+        return self.loss_criterion(np.ones_like(self.Y_val), self.Y_val)
+
+    @property
+    def naive_hit_rate_val(self):
+        """
+        Hit-rate of trivially predicting 'no change' (ratio 1.0) on the validation split.
+
+        Caveat: sign(1.0 - 1.0) == 0 for the naive prediction, so this counts a hit only when the
+        target is *exactly* flat -- expect it to be close to 0. That is itself informative; use
+        naive_loss_val (not this) as the primary naive-baseline comparison.
+        """
+        return metrics.HitRateMetric()(np.ones_like(self.Y_val), self.Y_val, self.X_val)
+
     ### data preparation methods: ###
     def import_data(self):
         """ Import data from LSTMPredictor.price_csv_path file (if _price_series is None). """
@@ -1071,39 +1121,49 @@ class NNPredictor:
         This further requires specifying sampling_rate_minutes to find the first entry in that prediction hour.
         """
         (self._X, self._Y, self._X_dates, self._Y_dates
-         ) = preprocessing.create_rolling_window_view(input_series=self.normalised_price_series,
+         ) = preprocessing.create_rolling_window_view(input_series=self.price_series,
                                                       rolling_window_size=self.rolling_window_size,
                                                       forecast_horizon=self.forecast_horizon,
                                                       sampling_rate_minutes=self.sampling_rate_minutes,
                                                       daily_prediction_hour=self.daily_prediction_hour,
                                                       predict_before_daily_prediction_hour=self.predict_before_daily_prediction_hour,
                                                       verbose=self.verbose)
+        # per-window ratio normalisation: divide each (X, Y) row-pair by its own last X value
+        # (X[:, -1] == 1.0 exactly afterwards) instead of a globally-fit z-score. Stateless -> no
+        # leakage risk across the train/val split; reference prices are kept to de-normalise later.
+        self._X, self._Y, self._X_reference_prices = preprocessing.normalise_windows(self._X, self._Y)
         self._predictions_train = self._predictions_val = None  # and reset predictions
 
     def split_data(self, verbose: bool = None):
         """
         Leverages preprocessing.create_train_validation_split.
 
-        Splits training and target values into training and validation split.
+        Splits training and target values into a fixed chronological training and validation split.
+        A gap of `rolling_window_size + forecast_horizon` rows is discarded between the two splits to
+        prevent overlapping-window leakage: this is a conservative (row-based, not sample-based) bound
+        that is always sufficient regardless of daily_prediction_hour row spacing, and exact for
+        c/d-presets (whose consecutive rows are already 1 sample apart).
         """
         (self._X_train, self._X_val, self._Y_train, self._Y_val,
-         self._X_dates_train, self._X_dates_val, self._Y_dates_train, self._Y_dates_val
+         self._X_dates_train, self._X_dates_val, self._Y_dates_train, self._Y_dates_val,
+         self._X_reference_prices_train, self._X_reference_prices_val,
          ) = preprocessing.create_train_validation_split(X=self.X,
                                                          Y=self.Y,
                                                          X_dates=self.X_dates,
                                                          Y_dates=self.Y_dates,
                                                          verbose=self.verbose if verbose is None else verbose,
                                                          validation_split=self.validation_split,
-                                                         randomise=(self.randomise_validation_data_every is not None))
+                                                         gap_size=self.rolling_window_size + self.forecast_horizon,
+                                                         extra_arrays=(self.X_reference_prices,))
         self._predictions_train = self._predictions_val = None  # and reset predictions
 
     ### plotting methods:
     def plot_train_validation_overview(self):
         """ Plot training and validation data highlighted by colors. """
         fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(self.Y_dates_train[:, 0], self._normaliser.inverse_transform(self.Y_train[:, 0]), label='Training Data',
+        ax.plot(self.Y_dates_train[:, 0], self.Y_train[:, 0] * self.X_reference_prices_train[:, 0], label='Training Data',
                 color='blue')  # use first column (first price in forecast sequence)
-        ax.plot(self.Y_dates_val[:, 0], self._normaliser.inverse_transform(self.Y_val[:, 0]), label='Validation Data',
+        ax.plot(self.Y_dates_val[:, 0], self.Y_val[:, 0] * self.X_reference_prices_val[:, 0], label='Validation Data',
                 color='red')
         ax.set_xlabel('Date')
         ax.set_ylabel('Price')
@@ -1125,6 +1185,7 @@ class NNPredictor:
         X = self.X_train if data_split == 'training' else self.X_val
         Y_dates = self.Y_dates_train if data_split == 'training' else self.Y_dates_val
         Y = self.Y_train if data_split == 'training' else self.Y_val
+        reference_prices = self.X_reference_prices_train if data_split == 'training' else self.X_reference_prices_val
 
         # prepare day_slice:
         if day_slice is None or len(day_slice) != 2:
@@ -1133,17 +1194,17 @@ class NNPredictor:
         # plot result for daily multi-step predictions:
         marker = None if self.forecast_horizon > 1 else 'o'  # need to specify marker if single predictions are plotted
         fig, ax = plt.subplots(figsize=plot_size)
-        for ind, (x_datetime, features, y_datetime, pred, target) in enumerate(
-                zip(X_dates, X, Y_dates, predictions, Y)):
+        for ind, (x_datetime, features, y_datetime, pred, target, ref) in enumerate(
+                zip(X_dates, X, Y_dates, predictions, Y, reference_prices)):
             # plot only days within day_slice:
             if ind / predictions_per_day < day_slice[0]: continue
             if ind / predictions_per_day >= day_slice[1]: break  # plot only that many days
 
-            # plot features:
-            ax.plot(x_datetime, self._normaliser.inverse_transform(features), color=X_color)
+            # plot features (ratio-space values * reference price -> back to price space):
+            ax.plot(x_datetime, features * ref, color=X_color)
             # plot prediction and target:
-            ax.plot(y_datetime, self._normaliser.inverse_transform(target), color=Y_color, linewidth=3, marker=marker)
-            ax.plot(y_datetime, self._normaliser.inverse_transform(pred), color=pred_color, linestyle='--', marker=marker)
+            ax.plot(y_datetime, target * ref, color=Y_color, linewidth=3, marker=marker)
+            ax.plot(y_datetime, pred * ref, color=pred_color, linestyle='--', marker=marker)
 
         ax.set_xlabel('Date')
         ax.set_ylabel('Price')
@@ -1189,6 +1250,18 @@ class NNPredictor:
                             desc=f'Train loss: - | Val Loss: - | Patience {'/' if self.early_stopping_patience == 0 else f'{0}/{self.early_stopping_patience}'} | LRate: - | Progress',
                             ncols=200)
         loss_train_history, loss_val_history = [], []
+
+        # best-checkpoint tracking: initialised before the loop, independent of early stopping being
+        # enabled, so that training always ends on the best validation epoch, not just the last one.
+        # This is only meaningful because the validation split is now fixed (Phase 1.2) rather than
+        # re-randomised every few epochs -- "best loss so far" would be meaningless across different
+        # validation sets.
+        best_loss_val = float('inf')
+        best_loss_train = None
+        best_epoch = -1
+        best_state_dict = None
+        counter = 0
+
         for epoch in progress_bar:
             # eventually visualise training progress:
             if visualise_validation_predictions_every is not None:
@@ -1206,42 +1279,46 @@ class NNPredictor:
             # every training epoch needs to reset recent predictions:
             self._predictions_val = self._predictions_train = None
 
-            # scheduler step:
+            # scheduler step (ReduceLROnPlateau.step(loss_val) does not modify the model, so it's safe
+            # to call before the checkpoint comparison below):
             if self.lr_scheduler == 'plateau':
                 scheduler.step(loss_val)
             else:
                 scheduler.step()
 
-            # eventually randomise validation and training data:
-            if self.randomise_validation_data_every is not None:
-                if epoch % self.randomise_validation_data_every == 0:
-                    self.split_data(verbose=False)  # verbose=False to prevent status messages in every epoch
-
             loss_train_history.append(loss_train);
             loss_val_history.append(loss_val)
 
-            # early stopping check:
-            if self.early_stopping_patience != 0:
-                # initialisation of vars in epoch 0:
-                if epoch == 0:
-                    best_loss = loss_val
-                    counter = 0
-                    continue
-                # validation loss improved:
-                if loss_val < best_loss:
-                    best_loss = loss_val
-                    counter = 0
-                else:  # validation loss didn't improve
-                    counter += 1
-                    if counter >= self.early_stopping_patience:
-                        print("Early stopping triggered at validation loss of", loss_val)
-                        self._n_train_epochs = epoch + 1
-                        break
+            # best-checkpoint tracking + early stopping check:
+            if loss_val < best_loss_val:
+                best_loss_val = loss_val
+                best_loss_train = loss_train
+                best_epoch = epoch
+                best_state_dict = copy.deepcopy(self.nn_model.state_dict())  # deepcopy is mandatory:
+                # state_dict() returns references to live parameter tensors, so without deepcopy the
+                # "checkpoint" would mutate with every subsequent optimiser.step() and silently keep
+                # the last-epoch weights -- exactly the bug this checkpoint mechanism exists to fix.
+                counter = 0
+            else:
+                counter += 1
+                if self.early_stopping_patience != 0 and counter >= self.early_stopping_patience:
+                    print(f"Early stopping at epoch {epoch}; restoring best epoch {best_epoch} (val loss {best_loss_val})")
+                    self._n_train_epochs = epoch + 1
+                    break
 
             # progress bar for visualisation:
             progress_bar.desc = f'Train loss: {loss_train} | Val Loss: {loss_val}  | Patience {'/' if self.early_stopping_patience == 0 else f'{counter}/{self.early_stopping_patience}'} | LRate: {lr_train} | Progress'
 
-        # save final losses:
+        # restore best-epoch weights (runs on both break and normal loop completion) and report the
+        # best (not last) losses -- training to a fixed epoch count should still end on the best epoch:
+        if best_state_dict is not None:
+            self.nn_model.load_state_dict(best_state_dict)
+            self._predictions_train = self._predictions_val = None  # force recompute with restored weights,
+            # BEFORE hit_rate_train/hit_rate_val are evaluated below, so the saved filename's ValHR
+            # (which PredictorManager uses to *select* models) describes the restored, not discarded, weights.
+        loss_train, loss_val = best_loss_train, best_loss_val
+
+        # save final (best) losses:
         self._loss_train = loss_train
         self._loss_val = loss_val
 
@@ -1254,9 +1331,10 @@ class NNPredictor:
         if self.verbose:
             print(
                 f"Training finished.\nFinal loss training data: {loss_train}\t\t\t\tValidation data: {loss_val}", f"\nFinal hit-rate training data: {self.hit_rate_train}\t\t\tValidation data: {self.hit_rate_val}" if self.evaluate_hit_rate_upon_training else "")
+            print(f"Naive ('no change') baseline -- validation loss: {self.naive_loss_val}\t\tvalidation hit-rate: {self.naive_hit_rate_val}\n(model val loss should be clearly below the naive baseline; otherwise the model has learned nothing.)")
             fig, ax = plt.subplots(figsize=(12, 6))
-            ax.plot(range(self.n_train_epochs), loss_train_history, label='Training loss', color='blue')
-            ax.plot(range(self.n_train_epochs), loss_val_history, label='Validation loss', color='red')
+            ax.plot(range(len(loss_train_history)), loss_train_history, label='Training loss', color='blue')
+            ax.plot(range(len(loss_val_history)), loss_val_history, label='Validation loss', color='red')
             ax.set_xlabel('Epochs')
             ax.set_ylabel('Loss')
             ax.grid(True)
@@ -1275,8 +1353,14 @@ class NNPredictor:
             dates_provided = False
         input_values = np.array(input_values, dtype=np.float32)
 
-        # normalise input:
-        normalised_input = np.array(self.normaliser.transform(input_values), dtype=np.float64)
+        # normalise input using per-window ratio normalisation: divide by the last (most recent) price,
+        # so the model sees the same ~1.0-centred ratio space it was trained on. reference_price is
+        # whatever series the caller feeds in (ETF-scaled or index-scaled) -- no separate
+        # non_etf_price_factor-style conversion is needed here, only for display purposes.
+        reference_price = float(input_values[-1])
+        if reference_price <= 0:
+            raise ValueError(f"Last input value (used as normalisation reference) must be positive, got {reference_price}.")
+        normalised_input = np.array(input_values / reference_price, dtype=np.float64)
 
         # convert to required shape (batch_size, sequence_length, features)
         input_tensor = torch.unsqueeze(torch.Tensor(normalised_input), dim=0)
@@ -1284,10 +1368,15 @@ class NNPredictor:
         if input_tensor.size()[1] != self.rolling_window_size:
             raise ValueError(f"Input values length needs to match model's rolling window size ({self.rolling_window_size})")
 
-        # call model and re-transform input:
-        predictions = self.nn_model(input_tensor)
+        # call model and re-transform input (model outputs are ratio-space; multiply back by
+        # reference_price to return to price space).
+        # eval() + no_grad() are required here: without eval(), dropout stays active during
+        # single-window inference, making predict() nondeterministic run-to-run.
+        self.nn_model.eval()
+        with torch.no_grad():
+            predictions = self.nn_model(input_tensor)
         predictions = predictions.cpu().detach().numpy()
-        predictions = np.squeeze(self._normaliser.inverse_transform(predictions))
+        predictions = np.squeeze(predictions) * reference_price
         if dates_provided:
             prediction_dates = pd.date_range(input_dates.max() + pd.Timedelta(f'{self.sampling_rate_minutes}min'),
                                              input_dates.max() + self.forecast_horizon * pd.Timedelta(
@@ -1321,7 +1410,7 @@ class LSTMPredictor(NNPredictor):
     """ LSTM based stock price predictor framework. """
     def __init__(self,
                  # base class parameters:
-                 preset_type: Literal['a1', 'b1', 'b2', 'c1', 'c2', 'd1', 'd2', 'd3'] = None,
+                 preset_type: Literal['b1', 'b2', 'c1', 'c2', 'd1', 'd2', 'd3'] = None,
                  # allows for automatic inference of sampling_rate_minutes, daily_prediction_hour,
                  # predict_before_daily_prediction_hour, rolling_window_size and forecast_horizon
                  name: str = None,
@@ -1335,7 +1424,6 @@ class LSTMPredictor(NNPredictor):
                  rolling_window_size: int = 32,
                  forecast_horizon: int = 12,
                  validation_split: float = 0.2,
-                 randomise_validation_data_every: int = 10,
                  batch_size: int = 32,
                  forecast_step_loss_weight_range: [float, float] = (1, 0.7),  # eval parameter
                  use_mps_if_available: bool = False,  # training parameter
@@ -1364,7 +1452,7 @@ class LSTMPredictor(NNPredictor):
                          price_column=price_column,
                          preset_type=preset_type, name=name, rolling_window_size=rolling_window_size,
                          forecast_horizon=forecast_horizon, sampling_rate_minutes=sampling_rate_minutes,
-                         validation_split=validation_split, randomise_validation_data_every=randomise_validation_data_every,
+                         validation_split=validation_split,
                          daily_prediction_hour=daily_prediction_hour,
                          predict_before_daily_prediction_hour=predict_before_daily_prediction_hour,
                          batch_size=batch_size, forecast_step_loss_weight_range=forecast_step_loss_weight_range,
@@ -1406,7 +1494,7 @@ class LSTMPredictor(NNPredictor):
     # if no name is provided, this method is called as str-representation:
     def describe(self):
         intro_str = "------------------- LSTMPredictor Instance -------------------\n\n"
-        data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /14} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- randomise validation data every: {self.randomise_validation_data_every}th epoch\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
+        data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /14} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
         model_str = f"Model Attributes:\n- hidden LSTM layers: {self.hidden_lstm_layer_size}\n- number of LSTM layers: {self.n_lstm_layers}\n- pre LSTM fully connected layer: {self.use_pre_lstm_fc_layer}\n\n"
         if self.n_train_epochs is not None:
             training_str = f"Training Attributes:\n- final training loss: {self.loss_train}\n- final validation loss: {self.loss_val}\n- final training hit-rate: {self.hit_rate_train}\n- final validation hit-rate: {self.hit_rate_val}"
@@ -1539,7 +1627,7 @@ class TransformerPredictor(NNPredictor):
     """ Transformer-based stock price predictor framework. """
     def __init__(self,
                  # base class parameters:
-                 preset_type: Literal['a1', 'b1', 'b2', 'c1', 'c2', 'd1', 'd2', 'd3'] = None,
+                 preset_type: Literal['b1', 'b2', 'c1', 'c2', 'd1', 'd2', 'd3'] = None,
                  # allows for automatic inference of sampling_rate_minutes, daily_prediction_hour,
                  # predict_before_daily_prediction_hour, rolling_window_size and forecast_horizon
                  name: str = None,
@@ -1553,7 +1641,6 @@ class TransformerPredictor(NNPredictor):
                  rolling_window_size: int = 32,
                  forecast_horizon: int = 12,
                  validation_split: float = 0.2,
-                 randomise_validation_data_every: int = 10,
                  batch_size: int = 32,
                  forecast_step_loss_weight_range: [float, float] = (1, 0.7),  # eval parameter
                  use_mps_if_available: bool = False,  # training parameter
@@ -1583,7 +1670,7 @@ class TransformerPredictor(NNPredictor):
                          price_column=price_column,
                          preset_type=preset_type, name=name, rolling_window_size=rolling_window_size,
                          forecast_horizon=forecast_horizon, sampling_rate_minutes=sampling_rate_minutes,
-                         validation_split=validation_split, randomise_validation_data_every=randomise_validation_data_every,
+                         validation_split=validation_split,
                          daily_prediction_hour=daily_prediction_hour,
                          predict_before_daily_prediction_hour=predict_before_daily_prediction_hour,
                          batch_size=batch_size, forecast_step_loss_weight_range=forecast_step_loss_weight_range,
@@ -1625,7 +1712,7 @@ class TransformerPredictor(NNPredictor):
     # if no name is provided, this method is called as str-representation:
     def describe(self):
         intro_str = "------------------- TransformerPredictor Instance -------------------\n\n"
-        data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /14} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- randomise validation data every: {self.randomise_validation_data_every}th epoch\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
+        data_str = f"Data Attributes:\n- sampling rate: {self.sampling_rate_minutes} min (= {self.sampling_rate_minutes / 60} h = {self.sampling_rate_minutes /60 /14} d)\n- rolling window size: {self._rolling_window_size}\n- forecast horizon: {self._forecast_horizon}\n- daily prediction hour: {f'{self._daily_prediction_hour}:00\n- predicting at last observation before prediction hour: {self.predict_before_daily_prediction_hour}' if self.daily_prediction_hour is not None else 'None'}\n- validation split: {self._validation_split}\n- amount of training observations: {len(self.X_train)}\n- amount of validation observations: {len(self.X_val)}\n\n"
         model_str = f"Model Attributes:\n- hidden transformer layer size: {self.hidden_transformer_layer_size}\n- number of transformer layers: {self.n_transformer_layers}\n- number of transformer heads: {self.n_transformer_heads}\n- use learnable start token: {self.use_start_token}\n\n"
         if self.n_train_epochs is not None:
             training_str = f"Training Attributes:\n- final training loss: {self.loss_train}\n- final validation loss: {self.loss_val}\n- final training hit-rate: {self.hit_rate_train}\n- final validation hit-rate: {self.hit_rate_val}"
@@ -1779,7 +1866,6 @@ class PredictorManager:
         self.predictors = {}
         # Preset dictionary for preset_type inference
         self.preset_type_dict = {  # sampling_r_min, pred_h, pred_before_h, rw_size, fh_size
-            'a1': (15, 13, False, 20, 12),
             'b1': (60, 16, True, 42, 14),
             'b2': (60, 16, True, 70, 14),
             'c1': (60 * 14, 16, True, 15, 3),  # 14h business day duration (8-22)
@@ -2004,17 +2090,7 @@ class PredictorManager:
             raise ValueError(f"Predictor {name} not found.")
         architecture = predictor_dict['architecture']
         preset_category = predictor_dict['preset_type'][0]  # first letter indicates time resolution
-
-        if preset_category == 'a':
-            price_series = self.data_manager.a_interp_prices
-        elif preset_category == 'b':
-            price_series = self.data_manager.b_interp_prices
-        elif preset_category == 'c':
-            price_series = self.data_manager.c_interp_prices
-        elif preset_category == 'd':
-            price_series = self.data_manager.d_interp_prices
-        else:
-            raise ValueError(f"Invalid preset category: {preset_category}, has to be one of 'a', 'b', 'c' or 'd'.")
+        price_series = self._resolve_price_series(preset_category)
 
         if architecture == 'LSTM':
             return LSTMPredictor(model_load_file_path=predictor_dict['file_path'],
@@ -2085,6 +2161,65 @@ class PredictorManager:
         print(
             f"All fine-tuned models have been saved to:\t\t{finetune_working_directory}\nConsider moving such to a structured location.")
 
+    def _resolve_price_series(self, preset_category: str) -> pd.Series:
+        """
+        Resolves the interpolated price series associated with a preset category ('b', 'c' or 'd')
+        via self.data_manager. Shared by instantiate_predictor and train_fresh_predictors.
+        """
+        if self.data_manager is None: raise ValueError(
+            "self.data_manager required to resolve a price series.")
+        if preset_category == 'b':
+            return self.data_manager.b_interp_prices
+        elif preset_category == 'c':
+            return self.data_manager.c_interp_prices
+        elif preset_category == 'd':
+            return self.data_manager.d_interp_prices
+        else:
+            raise ValueError(f"Invalid preset category: {preset_category}, has to be one of 'b', 'c' or 'd'.")
+
+    def train_fresh_predictors(self, architectures: [str], presets: [str],
+                               save_directory: Union[Path, str],
+                               train_epochs: int = 200, early_stopping_patience: int = 10,
+                               verbose_training: bool = True, **predictor_kwargs):
+        """
+        Train new, randomly-initialised predictors (no warm start) for each architecture/preset
+        combination and save them to save_directory.
+
+        Use this to bootstrap SAVED_MODELS after a scheme change that invalidates existing checkpoints
+        (e.g. Phase 1: old models were fit under global z-score normalisation with a randomised,
+        overlapping-window train/val split; both are now semantically incompatible with the new
+        per-window ratio-normalised, fixed-gap-split pipeline). Unlike fine_tune_predictors, this does
+        not warm-start from an existing "best" model -- warm-starting into a different input-scaling
+        scheme is worse than random init, and the old "best" selection (by ValHR) is itself invalid
+        under the new scheme.
+
+        Parameters
+        ----------
+        architectures : list of str
+            Architectures to train, e.g. ['LSTM'].
+        presets : list of str
+            Preset types to train, e.g. ('b1', 'b2', 'c1', 'c2', 'd1', 'd2', 'd3').
+        save_directory : Union[Path, str]
+            Directory to save the freshly-trained models to.
+        train_epochs : int, optional
+            Number of epochs to train each model for, default is 200.
+        early_stopping_patience : int, optional
+            Number of epochs for early stopping patience, default is 10.
+        verbose_training : bool, optional
+            If True, enables verbose output during training, default is True.
+        predictor_kwargs : dict, optional
+            Additional keyword arguments passed to the predictor constructor (e.g. hidden layer sizes).
+        """
+        for architecture, preset in product(architectures, presets):
+            print("\nTraining fresh predictor for architecture:\t\t", architecture, "\tand preset type:\t\t", preset, "")
+            price_series = self._resolve_price_series(preset[0])
+            cls = LSTMPredictor if architecture == 'LSTM' else TransformerPredictor
+            instance = cls(preset_type=preset, price_series=price_series,
+                           model_save_directory=save_directory, verbose=verbose_training, **predictor_kwargs)
+            instance.run_training(custom_n_epochs=train_epochs,
+                                  custom_early_stopping_patience=early_stopping_patience)
+
+        print(f"All freshly-trained models have been saved to:\t\t{save_directory}")
 
     def _infer_predictor_name(self, architecture: str, val_hr: float, preset_type: str):
         """

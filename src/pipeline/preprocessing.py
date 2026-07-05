@@ -5,7 +5,7 @@ import yfinance as yf
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Literal, Union
+from typing import Literal, Union, Tuple
 from tqdm import tqdm
 import time
 from alpha_vantage.timeseries import TimeSeries
@@ -15,6 +15,17 @@ import src.pipeline.web_interaction as webinteraction
 
 
 class Normaliser():
+    """
+    Fits a global mean/std on a series and (de-)normalises via z-scoring.
+
+    Notes
+    -----
+    No longer used by NNPredictor since per-window ratio normalisation (Phase 1.1) replaced it —
+    a globally-fit normaliser is exactly the shape of implicit global state that caused the
+    train/val leakage bug fixed in Phase 1 (fitting on the full series, including future validation
+    data, before splitting). Left in place, untouched, in case it is useful for other purposes
+    (e.g. Phase 3.2's volume scaling).
+    """
     def __init__(self):
         self.mu = None
         self.sd = None
@@ -38,6 +49,35 @@ class Normaliser():
         if self.sd is None: raise AttributeError(
             "Please use fit_transform first so this instance remembers the respective std. and mean values!")
         return (x * self.sd) + self.mu
+
+
+def normalise_windows(X: np.ndarray, Y: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Divide each (X, Y) row-pair by the last value of its X window (per-window ratio normalisation).
+
+    This is stateless: unlike a fitted global normaliser, the reference value is known per-sample
+    at the call site (the last window value), so there is nothing to leak across a train/val split.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Rolling window training data, shape (n_samples, rolling_window_size).
+    Y : np.ndarray
+        Rolling window target data, shape (n_samples, forecast_horizon).
+
+    Returns
+    -------
+    tuple of np.ndarray
+        (X_ratio, Y_ratio, reference_prices) where reference_prices has shape (n_samples, 1).
+    """
+    ref = X[:, -1:].copy()  # copy is essential: X is a stride-tricks *view* into the price array;
+    # ref must not alias it, and X / ref (below) creates a new array rather than mutating X in place.
+    return X / ref, Y / ref, ref
+
+
+def denormalise_windows(X_ratio: np.ndarray, Y_ratio: np.ndarray, reference_prices: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """ Inverse of normalise_windows: multiply ratio-space (X, Y) row-pairs by their reference prices. """
+    return X_ratio * reference_prices, Y_ratio * reference_prices
 
 
 class StockPriceDataManager:
@@ -600,36 +640,75 @@ def create_rolling_window_view(input_series: pd.Series,
 def create_train_validation_split(X: np.ndarray, Y: np.ndarray,
                                   X_dates: np.ndarray, Y_dates: np.ndarray,
                                   validation_split: float = 0.2,
-                                  randomise: bool = True,
+                                  gap_size: int = 0,
+                                  extra_arrays: tuple = (),
                                   verbose: bool = False):
     """
-    Splits training and target values into training and validation split.
+    Splits training and target values into a chronological training and validation split, discarding
+    a gap of rows between them to prevent overlapping-window leakage between train and validation samples.
 
-    Returns tuple with X_train, X_val, Y_train, Y_val, X_dates_train, X_dates_val, Y_dates_train, Y_dates_val.
+    Validation is always the chronologically *last* block (no randomisation/shuffling of rows — rows
+    are already ordered in time, and shuffling would destroy the very locality the gap is meant to
+    protect). The gap immediately preceding the validation block is discarded from both splits.
+
+    Parameters
+    ----------
+    X, Y : np.ndarray
+        Rolling window training/target data, first axis is the (chronologically ordered) sample axis.
+    X_dates, Y_dates : np.ndarray
+        Corresponding date arrays, split with identical boundaries.
+    validation_split : float, default 0.2
+        Fraction of samples (before the gap is removed) to reserve for validation.
+    gap_size : int, default 0
+        Number of rows immediately before the validation block to discard from both splits, to ensure
+        no train window/target overlaps in underlying price data with a validation window/target.
+    extra_arrays : tuple of np.ndarray, default ()
+        Additional arrays sharing the same first-axis sample ordering as X (e.g. per-window reference
+        prices) to be split with identical boundaries. Each is returned as a (train, val) pair, in the
+        same order, appended after the fixed positional returns.
+    verbose : bool, default False
+        Whether to print information about the resulting split sizes.
+
+    Returns
+    -------
+    tuple
+        (X_train, X_val, Y_train, Y_val, X_dates_train, X_dates_val, Y_dates_train, Y_dates_val,
+         *extra_train_val_pairs) — for each array in extra_arrays, its (train, val) pair is appended,
+        in order.
+
+    Raises
+    ------
+    ValueError
+        If the gap consumes the entire training set, or no validation samples remain.
     """
-    if randomise:
-        # shuffle row indices:
-        idx = np.random.permutation(X.shape[0])
+    n = X.shape[0]
+    n_val = int(n * validation_split)
+    val_start = n - n_val
+    train_end = max(val_start - gap_size, 0)
 
-        # apply to all matrices so that rows that belong together, still have the same index:
-        X = X[idx]; X_dates = X_dates[idx]; Y = Y[idx]; Y_dates = Y_dates[idx]
-        # afterwards the same procedure as without randomisation can be kept
+    if train_end <= 0:
+        raise ValueError(
+            f"gap_size ({gap_size}) consumed the entire training set (n={n}, n_val={n_val}, val_start={val_start}). "
+            f"Provide a longer price history or reduce gap_size/validation_split.")
+    if n_val == 0:
+        raise ValueError(f"validation_split ({validation_split}) yields zero validation samples for n={n} samples.")
 
-    # derive index separating last rows of data:
-    validation_split_index = int(X.shape[0] * (1 - validation_split))
+    # split train ([:train_end]) / gap ([train_end:val_start], discarded) / val ([val_start:]):
+    X_train = X[:train_end]; X_val = X[val_start:]
+    Y_train = Y[:train_end]; Y_val = Y[val_start:]
+    X_dates_train = X_dates[:train_end]; X_dates_val = X_dates[val_start:]
+    Y_dates_train = Y_dates[:train_end]; Y_dates_val = Y_dates[val_start:]
 
-    # split train and validation values:
-    X_train = X[:validation_split_index]; X_val = X[validation_split_index:]
-    Y_train = Y[:validation_split_index]; Y_val = Y[validation_split_index:]
     if verbose:
-        print(f"Using last {100 * validation_split}% of data for validation. Other data for training.")
+        print(f"Using last {100 * validation_split}% of data for validation (chronological, no shuffling).")
+        print(f"Discarding a gap of {gap_size} rows ({val_start - train_end} rows actually dropped) between train and validation to prevent window-overlap leakage.")
         print(f"This yields {len(X_train)} training and {len(X_val)} validation observations.")
 
-    # split respective dates:
-    X_dates_train = X_dates[:validation_split_index]; X_dates_val = X_dates[validation_split_index:]
-    Y_dates_train = Y_dates[:validation_split_index]; Y_dates_val = Y_dates[validation_split_index:]
+    result = [X_train, X_val, Y_train, Y_val, X_dates_train, X_dates_val, Y_dates_train, Y_dates_val]
+    for extra in extra_arrays:
+        result.append(extra[:train_end]); result.append(extra[val_start:])
 
-    return X_train, X_val, Y_train, Y_val, X_dates_train, X_dates_val, Y_dates_train, Y_dates_val
+    return tuple(result)
 
 
 
