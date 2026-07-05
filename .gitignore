@@ -1,0 +1,22 @@
+# directories to ignore:
+private/
+input/
+data/interpolated_prices_dax/
+data/minutely_price_downloads/
+output/prediction_plots/
+.claude/
+.idea/
+
+# suffixes to ignore:
+*archive
+*log
+*logs
+
+# prefixes
+private*
+input*
+
+# OS / editor junk
+.DS_Store
+__pycache__/
+*.pyc
